@@ -1,5 +1,7 @@
 # local-gateway
 
+简体中文 | [English](README.en.md)
+
 Windows 本地统一网络入口：**TUN 分流 + 系统代理 + 节点故障切换 + 可选 AI/Codex 路由**。
 
 - 默认入口：`127.0.0.1:8799`
