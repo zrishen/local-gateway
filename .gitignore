@@ -1,0 +1,34 @@
+# Runtime and local-only data
+/logs/
+/work/
+
+# Generated kernel configuration
+/config.json
+/config.proxy.json
+/config.next.json
+/config.stage.json
+/config.*.json
+
+# Machine-local overrides and secrets
+/settings.local.json
+/gateway/*.local.json
+/tools/network/
+
+# Runtime state and secrets; the Codex model catalog is deployable configuration
+/state/*
+!/state/codex-models.json
+
+# Bundled binary is installed from bin/source.json
+/bin/*
+!/bin/source.json
+
+# Routing rules are deployable assets
+/rules/*
+!/rules/source.json
+!/rules/*.srs
+
+__pycache__/
+*.pyc
+.env
+.venv/
+.pytest_cache/

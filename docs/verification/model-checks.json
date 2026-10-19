@@ -1,0 +1,48 @@
+{
+  "verified_at": "2026-10-19",
+  "backend_version": "0.163.0-alpha.10.2",
+  "tests": "Synthetic text, read-only shell, color fixture, local discovery; remote plugin writes not tested.",
+  "models": [
+    {
+      "model": "ds/deepseek-v4.1-flash",
+      "fresh_input_tokens": 9189,
+      "shell": true,
+      "image": true,
+      "discovery": true,
+      "discovered_tool_call": null,
+      "notes": "Native route unchanged; discovery and shell verified separately."
+    },
+    {
+      "model": "glm-req/glm-5.3",
+      "fresh_input_tokens": 8261,
+      "shell": true,
+      "image": false,
+      "discovery": true,
+      "discovered_tool_call": true
+    },
+    {
+      "model": "glm-req/glm-5.3-flash",
+      "fresh_input_tokens": 8935,
+      "shell": true,
+      "image": true,
+      "discovery": true,
+      "discovered_tool_call": true
+    },
+    {
+      "model": "google/gemini-3.8-flash",
+      "fresh_input_tokens": 8791,
+      "shell": true,
+      "image": true,
+      "discovery": true,
+      "discovered_tool_call": true
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "fresh_input_tokens": 11357,
+      "shell": true,
+      "image": true,
+      "discovery": true,
+      "discovered_tool_call": true
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "SakuraHost": "127.0.0.1",
+  "SakuraPort": 12450,
+  "SakuraControllerPort": 12440,
+  "PublicPort": 8799,
+  "MixedPort": 12550,
+  "DnsPort": 12553,
+  "ControllerPort": 12540,
+  "TunName": "UnifiedBox",
+  "CompanyDomains": [],
+  "CompanyDns": "",
+  "CompanyDnsAlternative": "",
+  "PhysicalInterface": "",
+  "PythonPath": "",
+  "SakuraRegion": "美国",
+  "SakuraLatencyIntervalMinutes": 60,
+  "SakuraHealthCheckMinutes": 5,
+  "SakuraMinimumThroughputKBps": 20,
+  "SakuraTunValidation": true,
+  "SakuraEndpointRefreshMinutes": 60,
+  "NodeEndpointDnsResolvers": [
+    "223.5.5.5",
+    "119.29.29.29",
+    "114.114.114.114"
+  ],
+  "SakuraEndpointHistoryPerHost": 24,
+  "SakuraEndpointSuccessRetentionDays": 30,
+  "SakuraEndpointFailureRetentionDays": 7,
+  "SakuraEndpointProbeCandidatesPerNode": 8,
+  "AiUpstream": "",
+  "CompanyProbeHosts": []
+}

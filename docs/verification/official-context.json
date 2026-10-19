@@ -1,0 +1,42 @@
+{
+  "model": "gpt-6-luna",
+  "configured_window": 872000,
+  "padding_repetitions_requested": 780000,
+  "requests": [
+    {
+      "path": "/codex/responses",
+      "model": "gpt-6-luna",
+      "request_bytes": 2015141,
+      "contains_start_marker": true,
+      "contains_end_marker": true,
+      "padding_lines": 390000,
+      "input_sha256": "2acc2e2b67510b8338eeac9b1b14b9c9e75d15c317ce18f35ff6091ca7a5fa24",
+      "http_status": 200
+    }
+  ],
+  "provider": "unified_local",
+  "account_type": "chatgpt",
+  "usage": {
+    "total": {
+      "totalTokens": 792970,
+      "inputTokens": 792951,
+      "cachedInputTokens": 0,
+      "cacheWriteInputTokens": 0,
+      "outputTokens": 19,
+      "reasoningOutputTokens": 0
+    },
+    "last": {
+      "totalTokens": 792970,
+      "inputTokens": 792951,
+      "cachedInputTokens": 0,
+      "cacheWriteInputTokens": 0,
+      "outputTokens": 19,
+      "reasoningOutputTokens": 0
+    },
+    "modelContextWindow": 828400
+  },
+  "status": "completed",
+  "error": null,
+  "markers_correct": true,
+  "seconds": 32.19
+}
