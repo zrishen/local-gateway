@@ -57,6 +57,10 @@ class ModeMonitor:
         self.last_mode = None
         self.last_enabled = None
         self.last_available = None
+        self.last_embedded_ok = 0.0
+        self.last_embedded_state = None
+        self.embedded_grace_seconds = max(
+            0.0, float(settings.get('EmbeddedStateGraceSeconds', 30)))
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         self.secret = (self.root / 'state/controller-secret.txt').read_text().strip()
 
@@ -99,7 +103,8 @@ class ModeMonitor:
                 inner = self.controller('/proxies/' + current)
                 current = str(inner.get('now') or '')
             return embedded, current, region_group
-        except Exception:
+        except Exception as error:
+            logging.debug('Embedded core state unavailable: %s', error)
             return False, '', ''
 
     def selection_state(self):
@@ -118,7 +123,20 @@ class ModeMonitor:
         file_ready, node_count, names = self.upstream_state()
         core_embedded, selected, region_group = self.core_embedded_state()
         selection = self.selection_state()
-        embedded = file_ready and core_embedded
+        now_monotonic = time.monotonic()
+        if file_ready and core_embedded:
+            embedded = True
+            embedded_state = 'ready'
+            self.last_embedded_ok = now_monotonic
+        elif (file_ready and self.last_embedded_ok and
+              now_monotonic - self.last_embedded_ok <= self.embedded_grace_seconds):
+            # A local control-interface timeout must not make working proxy
+            # traffic fall back to Direct. Hold the last good state briefly.
+            embedded = True
+            embedded_state = 'grace'
+        else:
+            embedded = False
+            embedded_state = 'unavailable'
         sakura_available = backend_ready(self.settings)
         available = embedded or sakura_available
         native = is_proxy(server, self.settings['SakuraPort'])
@@ -139,12 +157,18 @@ class ModeMonitor:
             self.controller('/configs', 'PATCH', {'mode': desired})
         # SakuraCat is allowed to take over the system proxy while enabled.
         if desired != self.last_mode:
-            logging.info('Network mode: %s (embedded subscription=%s, SakuraCat available=%s)',
-                         desired, embedded, sakura_available)
+            logging.info('Network mode: %s (embedded subscription=%s/%s, SakuraCat available=%s)',
+                         desired, embedded, embedded_state, sakura_available)
             self.last_mode = desired
+        if embedded_state != self.last_embedded_state:
+            logging.info('Embedded state: %s (file_ready=%s, core_ready=%s, grace=%.0fs)',
+                         embedded_state, file_ready, core_embedded, self.embedded_grace_seconds)
+            self.last_embedded_state = embedded_state
         snapshot = {
             'mode': desired,
             'upstream': 'subscription' if embedded else 'sakuracat',
+            'embedded_state': embedded_state,
+            'embedded_grace_seconds': self.embedded_grace_seconds,
             'nodes': node_count if embedded else 0,
             'region': selection.get('region') if embedded else None,
             'region_group': region_group if embedded else None,

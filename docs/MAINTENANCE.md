@@ -70,6 +70,8 @@
 
 状态字段在 `state/mode.json` 的 `system_proxy` 和 `system_proxy_server`。
 
+订阅模式的控制接口偶尔超时不会被立即当成不可用：项目会暂时保持 `Rule`，默认容忍 30 秒，避免正常代理流量被错误切到 `Direct`。`state/mode.json` 的 `embedded_state` 会显示 `ready`、`grace` 或 `unavailable`，可用参数 `EmbeddedStateGraceSeconds` 调整容忍时间。
+
 ## 日志与诊断
 
 | 文件 | 内容 |

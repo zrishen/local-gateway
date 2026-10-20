@@ -28,5 +28,6 @@
   "SakuraEndpointFailureRetentionDays": 7,
   "SakuraEndpointProbeCandidatesPerNode": 8,
   "AiUpstream": "",
-  "CompanyProbeHosts": []
+  "CompanyProbeHosts": [],
+  "EmbeddedStateGraceSeconds": 30
 }

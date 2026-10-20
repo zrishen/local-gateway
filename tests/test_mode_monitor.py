@@ -31,6 +31,62 @@ class ProxyPolicyTests(unittest.TestCase):
         self.assertEqual(mode_monitor.proxy_policy(True, '127.0.0.1:18080', SETTINGS), 'external')
 
 
+class EmbeddedGraceTests(unittest.TestCase):
+    def make_monitor(self, root, settings):
+        (root / 'state').mkdir()
+        (root / 'state/controller-secret.txt').write_text('secret', encoding='utf-8')
+        monitor = mode_monitor.ModeMonitor(root, settings)
+        mode = {'value': 'Rule'}
+        def controller(path, method='GET', body=None):
+            if method == 'PATCH':
+                mode['value'] = body['mode']
+                return None
+            return {'mode': mode['value']}
+        monitor.controller = controller
+        monitor.upstream_state = Mock(return_value=(True, 3, {}))
+        monitor.selection_state = Mock(return_value={})
+        monitor.set_public_proxy = Mock()
+        return monitor, mode
+
+    def test_short_control_timeout_keeps_rule(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = dict(SETTINGS, EmbeddedStateGraceSeconds=30)
+            monitor, mode = self.make_monitor(root, settings)
+            monitor.core_embedded_state = Mock(side_effect=[
+                (True, 'sakura-001', 'sakura-region-us'),
+                (False, '', ''),
+            ])
+            with patch.object(mode_monitor, 'read_proxy', return_value=(True, '127.0.0.1:8799')), \
+                 patch.object(mode_monitor, 'backend_ready', return_value=False), \
+                 patch.object(mode_monitor.time, 'monotonic', side_effect=[100.0, 101.0]):
+                monitor.tick()
+                monitor.tick()
+            self.assertEqual(mode['value'], 'Rule')
+            state = json.loads((root / 'state/mode.json').read_text(encoding='utf-8'))
+            self.assertEqual(state['embedded_state'], 'grace')
+
+    def test_persistent_control_failure_eventually_switches_direct(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = dict(SETTINGS, EmbeddedStateGraceSeconds=30)
+            monitor, mode = self.make_monitor(root, settings)
+            monitor.core_embedded_state = Mock(side_effect=[
+                (True, 'sakura-001', 'sakura-region-us'),
+                (False, '', ''),
+                (False, '', ''),
+            ])
+            with patch.object(mode_monitor, 'read_proxy', return_value=(True, '127.0.0.1:8799')), \
+                 patch.object(mode_monitor, 'backend_ready', return_value=False), \
+                 patch.object(mode_monitor.time, 'monotonic', side_effect=[100.0, 110.0, 140.0]):
+                monitor.tick()
+                monitor.tick()
+                monitor.tick()
+            self.assertEqual(mode['value'], 'Direct')
+            state = json.loads((root / 'state/mode.json').read_text(encoding='utf-8'))
+            self.assertEqual(state['embedded_state'], 'unavailable')
+
+
 class TickTests(unittest.TestCase):
     def make_monitor(self, root):
         (root / 'state').mkdir()
