@@ -107,6 +107,17 @@ class ModeMonitor:
             logging.debug('Embedded core state unavailable: %s', error)
             return False, '', ''
 
+    def region_for_group(self, group):
+        try:
+            data = json.loads(
+                (self.root / 'state/sakura-outbounds.json').read_text(encoding='utf-8'))
+            for region, info in (data.get('region_groups') or {}).items():
+                if info.get('group') == group:
+                    return region
+        except (OSError, ValueError, TypeError):
+            pass
+        return None
+
     def selection_state(self):
         try:
             return json.loads((self.root / 'state/sakura-selection.json').read_text(encoding='utf-8'))
@@ -170,10 +181,11 @@ class ModeMonitor:
             'embedded_state': embedded_state,
             'embedded_grace_seconds': self.embedded_grace_seconds,
             'nodes': node_count if embedded else 0,
-            'region': selection.get('region') if embedded else None,
+            'region': ((self.region_for_group(region_group) or selection.get('region'))
+                       if embedded else None),
             'region_group': region_group if embedded else None,
-            'node': selection.get('tag') or (selected if embedded else None),
-            'node_name': selection.get('name') or (names.get(selected) if embedded else None),
+            'node': selected if embedded else selection.get('tag'),
+            'node_name': (names.get(selected) or selection.get('name')) if embedded else selection.get('name'),
             'delay': selection.get('delay') if embedded else None,
             'sakura_available': sakura_available,
             'sakura_requested': bool(self.intent),

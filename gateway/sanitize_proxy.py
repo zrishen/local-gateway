@@ -35,13 +35,15 @@ import json
 import os
 from pathlib import Path
 import re
-import socket
 import socketserver
 import sys
 import time
 import urllib.parse
 
 from settings_config import load_settings
+from upstream_routing import load_dns_overrides
+from upstream_transport import (CONNECT_TIMEOUT, MAX_ATTEMPTS, UpstreamUnavailable,
+                                error_payload, record_event, request_upstream)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_SETTINGS = load_settings(PROJECT_ROOT)
@@ -51,13 +53,7 @@ DUMP = os.environ.get("SANITIZE_DUMP") == "1"
 FORCE_CLEAN = os.environ.get("SANITIZE_FORCE_CLEAN") == "1"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DUMP_DIR = os.path.join(BASE_DIR, "dumps")
-DNS_OVERRIDES_PATH = os.path.join(BASE_DIR, "upstream-dns-overrides.json")
-LOCAL_DNS_OVERRIDES_PATH = os.path.join(BASE_DIR, "upstream-dns-overrides.local.json")
-UPSTREAM_DNS_OVERRIDES = {}
-for _path in (DNS_OVERRIDES_PATH, LOCAL_DNS_OVERRIDES_PATH):
-    if os.path.exists(_path):
-        with open(_path, encoding="utf-8-sig") as _dns_file:
-            UPSTREAM_DNS_OVERRIDES.update(json.load(_dns_file))
+UPSTREAM_DNS_OVERRIDES = load_dns_overrides(PROJECT_ROOT)
 
 
 def create_upstream_connection(up):
@@ -70,18 +66,10 @@ def create_upstream_connection(up):
     original_create_connection = conn._create_connection
 
     def connect_socket(address, *args, **kwargs):
-        try:
-            resolved = socket.getaddrinfo(address[0], address[1], type=socket.SOCK_STREAM)
-            use_override = any(
-                ipaddress.ip_address(item[4][0]) in ipaddress.ip_network("198.18.0.0/15")
-                for item in resolved
-            )
-        except socket.gaierror:
-            use_override = True
-        if use_override:
-            log("上游 DNS 直连: %s -> %s" % (address[0], override))
-            address = (override, address[1])
-        return original_create_connection(address, *args, **kwargs)
+        # An explicit machine-local override is authoritative, even when DNS
+        # returns a real (but unreachable) address. Only change the TCP target;
+        # HTTPSConnection still verifies the certificate/SNI for the hostname.
+        return original_create_connection((override, address[1]), *args, **kwargs)
 
     conn._create_connection = connect_socket
     return conn
@@ -279,6 +267,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                "proxy-connection", "upgrade"}
         return {k: v for k, v in self.headers.items() if k.lower() not in hop}
 
+    def _upstream_error(self, status, payload):
+        body = json.dumps(payload).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Connection', 'close')
+        self.end_headers()
+        if self.command != 'HEAD':
+            self.wfile.write(body)
+
     def _relay(self, method, body):
         if not UPSTREAM:
             self.send_response(503)
@@ -294,19 +292,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
         started = time.time()
         conn = None
         try:
-            conn = create_upstream_connection(up)
-            conn.request(method, target, body=body, headers=self._upstream_headers())
-            resp = conn.getresponse()
-        except Exception as e:
-            log("上游连接失败: %s" % e)
-            self.send_response(502)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Length", "0")
-            self.send_header("Connection", "close")
-            self.end_headers()
-            if conn:
-                conn.close()
+            conn, resp, request_id, attempts = request_upstream(
+                lambda: create_upstream_connection(up), method, target, body,
+                self._upstream_headers())
+        except UpstreamUnavailable as error:
+            self._upstream_error(502, error.payload())
             return
+
+        first = b''
+        if resp.status in (502, 503, 504):
+            try:
+                first = resp.read1(8192)
+            except (OSError, http.client.HTTPException) as error:
+                conn.close()
+                record_event({'request_id': request_id, 'phase': 'error_body',
+                              'cause': type(error).__name__, 'retry': False})
+                self._upstream_error(resp.status, error_payload(resp.status, request_id, attempts))
+                return
+            if not first:
+                conn.close()
+                self._upstream_error(resp.status, error_payload(resp.status, request_id, attempts))
+                return
 
         self.send_response(resp.status)
         for k, v in resp.getheaders():
@@ -314,19 +320,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 continue
             self.send_header(k, v)
         self.send_header("Connection", "close")
+        self.send_header('X-Local-Gateway-Request-ID', request_id)
         self.end_headers()
 
         total = 0
         try:
+            if first:
+                self.wfile.write(first)
+                self.wfile.flush()
+                total += len(first)
             while True:
-                chunk = resp.read(8192)
+                chunk = resp.read1(8192)
                 if not chunk:
                     break
                 total += len(chunk)
                 self.wfile.write(chunk)
                 self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        except (OSError, http.client.HTTPException) as error:
+            record_event({'request_id': request_id, 'phase': 'stream',
+                          'cause': type(error).__name__, 'bytes': total, 'retry': False})
         finally:
             conn.close()
         log("  <- %s  %d bytes  %.2fs" % (resp.status, total, time.time() - started))
@@ -336,6 +348,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             payload = json.dumps({
                 "ok": True, "configured": bool(UPSTREAM), "port": PORT,
                 "upstream_dns_override_count": len(UPSTREAM_DNS_OVERRIDES),
+                "upstream_dns_override_mode": "explicit",
+                "upstream_connect_timeout_seconds": CONNECT_TIMEOUT,
+                "upstream_max_attempts": MAX_ATTEMPTS,
                 "requests": STATS["requests"], "cleaned_nodes": STATS["cleaned_nodes"],
                 "mapped_requests": STATS["mapped"], "model_map": MODEL_MAP,
             }, ensure_ascii=False).encode()
@@ -367,28 +382,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
         up = urllib.parse.urlsplit(UPSTREAM)
         conn = None
         try:
-            conn = create_upstream_connection(up)
             headers = self._upstream_headers()
             headers["Content-Type"] = "application/json"
             target = up.path.rstrip("/") + "/v1/chat/completions"
-            conn.request("POST", target, body=json.dumps(chat, ensure_ascii=False).encode("utf-8"), headers=headers)
-            resp = conn.getresponse()
-        except Exception as e:
-            log("bridge 上游连接失败: %s" % e)
-            self.send_response(502); self.send_header("Content-Length", "0"); self.send_header("Connection", "close"); self.end_headers()
-            if conn: conn.close()
+            conn, resp, request_id, attempts = request_upstream(
+                lambda: create_upstream_connection(up), 'POST', target,
+                json.dumps(chat, ensure_ascii=False).encode('utf-8'), headers)
+        except UpstreamUnavailable as error:
+            self._upstream_error(502, error.payload())
             return
 
         if resp.status != 200:
-            err = resp.read()
-            log("bridge 上游返回 %s: %s" % (resp.status, err[:200]))
+            try:
+                err = resp.read()
+            except (OSError, http.client.HTTPException) as error:
+                record_event({'request_id': request_id, 'phase': 'error_body',
+                              'cause': type(error).__name__, 'retry': False})
+                err = json.dumps(error_payload(resp.status, request_id, attempts)).encode('utf-8')
+            finally:
+                conn.close()
+            log("bridge upstream HTTP %s (request_id=%s)" % (resp.status, request_id))
+            if not err and resp.status in (502, 503, 504):
+                err = json.dumps(error_payload(resp.status, request_id, attempts)).encode('utf-8')
             self.send_response(resp.status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(err)))
             self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(err)
-            conn.close()
             return
 
         def chat_chunks():
@@ -408,6 +429,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
+        self.send_header('X-Local-Gateway-Request-ID', request_id)
         self.end_headers()
         total = 0
         try:
@@ -415,8 +437,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(ev)
                 self.wfile.flush()
                 total += len(ev)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        except (OSError, http.client.HTTPException) as error:
+            record_event({'request_id': request_id, 'phase': 'stream',
+                          'cause': type(error).__name__, 'bytes': total, 'retry': False})
         finally:
             conn.close()
         log("  <- bridge 200  %d bytes" % total)

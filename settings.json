@@ -13,9 +13,18 @@
   "PhysicalInterface": "",
   "PythonPath": "",
   "SakuraRegion": "美国",
+  "SakuraSelectionRegions": [
+    "美国",
+    "新加坡"
+  ],
+  "SakuraCrossRegionFallback": true,
+  "SakuraFallbackRegions": [
+    "新加坡"
+  ],
+  "SakuraPreferredFallbackNodes": [],
   "SakuraLatencyIntervalMinutes": 60,
   "SakuraHealthCheckMinutes": 5,
-  "SakuraMinimumThroughputKBps": 20,
+  "SakuraMinimumThroughputKBps": 50,
   "SakuraTunValidation": true,
   "SakuraEndpointRefreshMinutes": 60,
   "NodeEndpointDnsResolvers": [

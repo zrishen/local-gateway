@@ -108,7 +108,7 @@
       },
       "supports_image_detail_original": true,
       "context_window": 500000,
-      "max_context_window": 872000,
+      "max_context_window": 500000,
       "comp_hash": "3000",
       "effective_context_window_percent": 95,
       "experimental_supported_tools": [
@@ -234,8 +234,8 @@
         "limit": 10000
       },
       "supports_image_detail_original": true,
-      "context_window": 272000,
-      "max_context_window": 872000,
+      "context_window": 500000,
+      "max_context_window": 500000,
       "comp_hash": "3000",
       "effective_context_window_percent": 95,
       "experimental_supported_tools": [
@@ -361,8 +361,8 @@
         "limit": 10000
       },
       "supports_image_detail_original": true,
-      "context_window": 272000,
-      "max_context_window": 872000,
+      "context_window": 500000,
+      "max_context_window": 500000,
       "comp_hash": "3000",
       "effective_context_window_percent": 95,
       "experimental_supported_tools": [
@@ -483,8 +483,8 @@
         "limit": 10000
       },
       "supports_image_detail_original": true,
-      "context_window": 272000,
-      "max_context_window": 872000,
+      "context_window": 500000,
+      "max_context_window": 500000,
       "comp_hash": "3000",
       "effective_context_window_percent": 95,
       "experimental_supported_tools": [
@@ -578,8 +578,8 @@
         "limit": 10000
       },
       "supports_image_detail_original": true,
-      "context_window": 272000,
-      "max_context_window": 872000,
+      "context_window": 500000,
+      "max_context_window": 500000,
       "comp_hash": "3000",
       "effective_context_window_percent": 95,
       "experimental_supported_tools": [],
@@ -674,8 +674,8 @@
         "limit": 10000
       },
       "supports_image_detail_original": true,
-      "context_window": 272000,
-      "max_context_window": 872000,
+      "context_window": 500000,
+      "max_context_window": 500000,
       "comp_hash": "3000",
       "effective_context_window_percent": 95,
       "experimental_supported_tools": [],
@@ -770,8 +770,8 @@
         "limit": 10000
       },
       "supports_image_detail_original": true,
-      "context_window": 272000,
-      "max_context_window": 872000,
+      "context_window": 500000,
+      "max_context_window": 500000,
       "comp_hash": "3000",
       "effective_context_window_percent": 95,
       "experimental_supported_tools": [],
@@ -862,8 +862,8 @@
         "limit": 10000
       },
       "supports_image_detail_original": true,
-      "context_window": 272000,
-      "max_context_window": 872000,
+      "context_window": 500000,
+      "max_context_window": 500000,
       "comp_hash": "3000",
       "effective_context_window_percent": 95,
       "experimental_supported_tools": [],
@@ -960,8 +960,8 @@
         "limit": 10000
       },
       "supports_image_detail_original": true,
-      "context_window": 272000,
-      "max_context_window": 872000,
+      "context_window": 500000,
+      "max_context_window": 500000,
       "comp_hash": "3000",
       "effective_context_window_percent": 95,
       "experimental_supported_tools": [],
@@ -982,7 +982,7 @@
       "additional_speed_tiers": [],
       "availability_nux": null,
       "base_instructions": "You are Codex, a coding agent. You and the user share the same workspace and collaborate to achieve the user's goals.",
-      "context_window": 1000000,
+      "context_window": 500000,
       "default_reasoning_level": "max",
       "default_reasoning_summary": "none",
       "description": "Third-party API through local unified gateway",
@@ -993,7 +993,7 @@
         "text",
         "image"
       ],
-      "max_context_window": 1000000,
+      "max_context_window": 500000,
       "priority": 1006,
       "service_tiers": [],
       "shell_type": "shell_command",
@@ -1025,7 +1025,7 @@
       "additional_speed_tiers": [],
       "availability_nux": null,
       "base_instructions": "You are Codex, a coding agent. You and the user share the same workspace and collaborate to achieve the user's goals.",
-      "context_window": 1000000,
+      "context_window": 500000,
       "default_reasoning_level": "max",
       "default_reasoning_summary": "none",
       "description": "Third-party API through local unified gateway",
@@ -1035,7 +1035,7 @@
       "input_modalities": [
         "text"
       ],
-      "max_context_window": 1000000,
+      "max_context_window": 500000,
       "priority": 1007,
       "service_tiers": [],
       "shell_type": "shell_command",
@@ -1067,7 +1067,7 @@
       "additional_speed_tiers": [],
       "availability_nux": null,
       "base_instructions": "You are Codex, a coding agent. You and the user share the same workspace and collaborate to achieve the user's goals.",
-      "context_window": 1000000,
+      "context_window": 500000,
       "default_reasoning_level": "max",
       "default_reasoning_summary": "none",
       "description": "Third-party API through local unified gateway",
@@ -1078,7 +1078,7 @@
         "text",
         "image"
       ],
-      "max_context_window": 1000000,
+      "max_context_window": 500000,
       "priority": 1008,
       "service_tiers": [],
       "shell_type": "shell_command",
@@ -1110,7 +1110,7 @@
       "additional_speed_tiers": [],
       "availability_nux": null,
       "base_instructions": "You are Codex, a coding agent. You and the user share the same workspace and collaborate to achieve the user's goals.",
-      "context_window": 1000000,
+      "context_window": 500000,
       "default_reasoning_level": "high",
       "default_reasoning_summary": "none",
       "description": "Third-party API through local unified gateway",
@@ -1121,7 +1121,7 @@
         "text",
         "image"
       ],
-      "max_context_window": 1000000,
+      "max_context_window": 500000,
       "priority": 1009,
       "service_tiers": [],
       "shell_type": "shell_command",
@@ -1165,7 +1165,7 @@
       "additional_speed_tiers": [],
       "availability_nux": null,
       "base_instructions": "You are Codex, a coding agent. You and the user share the same workspace and collaborate to achieve the user's goals.",
-      "context_window": 1000000,
+      "context_window": 500000,
       "default_reasoning_level": "high",
       "default_reasoning_summary": "none",
       "description": "Third-party API through local unified gateway",
@@ -1176,7 +1176,7 @@
         "text",
         "image"
       ],
-      "max_context_window": 1000000,
+      "max_context_window": 500000,
       "priority": 1010,
       "service_tiers": [],
       "shell_type": "shell_command",

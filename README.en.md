@@ -12,7 +12,7 @@ A unified local network gateway for Windows: **TUN split tunneling + system prox
 - HTTP, HTTPS CONNECT, SOCKS5, and the local AI API share port `8799`
 - By default, websites and applications in mainland China connect directly; traffic to other destinations uses the proxy
 - Optional routing for company domains and internal DNS
-- Automatic node selection within the selected region, with failover when a node or entry IP becomes unavailable
+- Automatic selection across US and Singapore nodes, with health checks and entry-IP failover
 - System proxy enabled by default, while allowing SakuraCat to temporarily override it
 - Optional Trojan subscription import, without requiring the SakuraCat app
 - Optional routing between official Codex models and third-party API models
@@ -92,7 +92,8 @@ Common fields:
 | `PhysicalInterface` | Physical network adapter name |
 | `PythonPath` | Path to Python 3.14 |
 | `PublicPort` | Shared gateway port; defaults to `8799` |
-| `SakuraRegion` | Selected node region |
+| `SakuraRegion` | Default region for manual switching |
+| `SakuraSelectionRegions` | Automatic node pool; currently US and Singapore |
 | `CompanyDomains` | Company domain suffixes; empty by default |
 | `CompanyDns` | Company DNS; empty by default |
 | `CompanyProbeHosts` | Company health-check hosts; empty by default |
@@ -111,12 +112,18 @@ Do not publish subscription URLs, API keys, full configurations, or logs.
 
 ## Node selection
 
-The project uses two selection mechanisms together:
+The selector compares every non-multiplier node in the configured US and Singapore pool. The default settings are equivalent to:
 
-1. Every 60 minutes, run a full latency test within the selected region to select a reachable node.
-2. Every 5 minutes, check the current node and select another route if it fails.
+```json
+"SakuraSelectionRegions": ["美国", "新加坡"],
+"SakuraMinimumThroughputKBps": 50
+```
 
-When a node has multiple entry IPs, the project first probes TCP + TLS through the physical network adapter and includes only healthy entries in the configuration. Entries are checked every 5 minutes, and the full candidate set is refreshed every 60 minutes. Nodes whose names contain `5倍消耗` (5× usage) are excluded by default.
+Every 60 minutes, the gateway measures all pool nodes and chooses the highest-throughput candidate that also passes HTTPS, TUN, and ChatGPT checks. RTT is used as a tie breaker. Neither country has automatic priority.
+
+Every 5 minutes, it downloads a 64 KiB sample through the current node and verifies ChatGPT. Two consecutive samples below 50 KB/s, two consecutive ChatGPT failures, or a broken stream triggers a new full US/Singapore comparison. Health-triggered switches are observed for two rounds and restored if they do not improve service. Other regions and nodes marked `倍消耗` (multiplier usage) are excluded.
+
+When a node has multiple entry IPs, the project first probes TCP + TLS through the physical network adapter and includes only healthy entries in the configuration. Entries are checked every 5 minutes, and the full candidate set is refreshed every 60 minutes. Health state is recorded in `state/sakura-health.json`.
 
 ## Service endpoints
 

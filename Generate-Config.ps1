@@ -124,11 +124,16 @@ $config = [ordered]@{
     }
 }
 if (-not $ProxyOnly) {
+    # Private API traffic must not depend on the TUN lifecycle. Otherwise the
+    # hourly endpoint refresh can reset requests even with a fixed DNS mapping.
+    $tunExclusionJson = & $Settings.PythonPath -B (Join-Path $Root 'gateway\upstream_routing.py')
+    if ($LASTEXITCODE -ne 0) { throw 'Could not calculate private API TUN exclusions.' }
+    $tunExclusions = $tunExclusionJson | ConvertFrom-Json
     $config.inbounds = @(@{
         type='tun'; tag='tun-in'; interface_name=$Settings.TunName
         address=@('172.31.255.1/30','fdfe:dcba:9876::1/126')
         mtu=1500; auto_route=$true; strict_route=$false; dns_mode='native'; stack='mixed'
-        route_exclude_address=@('127.0.0.0/8','::1/128')
+        route_exclude_address=@($tunExclusions)
     }) + $config.inbounds
 }
 $name = if ($ProxyOnly) { 'config.proxy.json' } else { 'config.json' }

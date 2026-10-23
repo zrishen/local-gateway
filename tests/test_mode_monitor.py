@@ -111,6 +111,24 @@ class TickTests(unittest.TestCase):
             self.assertEqual(state['system_proxy'], 'project')
             self.assertEqual(state['system_proxy_server'], '127.0.0.1:8799')
 
+    def test_live_controller_selection_wins_over_stale_quality_snapshot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor = self.make_monitor(root)
+            monitor.core_embedded_state = Mock(
+                return_value=(True, 'sakura-067', 'sakura-region-us'))
+            monitor.selection_state = Mock(return_value={
+                'region': '美国', 'tag': 'sakura-065', 'name': 'Old'})
+            monitor.upstream_state = Mock(return_value=(True, 9, {'sakura-067': 'New'}))
+            monitor.region_for_group = Mock(return_value='韩国')
+            with patch.object(mode_monitor, 'read_proxy', return_value=(True, '127.0.0.1:8799')), \
+                 patch.object(mode_monitor, 'backend_ready', return_value=False):
+                monitor.tick()
+            state = json.loads((root / 'state/mode.json').read_text(encoding='utf-8'))
+            self.assertEqual(state['node'], 'sakura-067')
+            self.assertEqual(state['node_name'], 'New')
+            self.assertEqual(state['region'], '韩国')
+
     def test_sakuracat_proxy_is_not_overwritten(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -34,6 +34,16 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertEqual(self.levels('google/gemini-3.8-flash'),
                          ['low', 'medium', 'high', 'xhigh', 'max'])
 
+    def test_all_models_use_475k_effective_context(self):
+        for slug, model in self.models.items():
+            with self.subTest(model=slug):
+                self.assertEqual(model['context_window'], 500000)
+                self.assertEqual(model['max_context_window'], 500000)
+                self.assertEqual(model['effective_context_window_percent'], 95)
+                self.assertEqual(
+                    model['context_window'] * model['effective_context_window_percent'] // 100,
+                    475000)
+
     def test_official_models_do_not_inherit_provider_max(self):
         # The desktop Max toggle applies globally. Official entries must omit
         # max so enabling it for DeepSeek cannot expose it on official models.

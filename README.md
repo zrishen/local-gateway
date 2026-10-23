@@ -90,7 +90,8 @@ settings.local.json
 | `PhysicalInterface` | 物理网卡名称 |
 | `PythonPath` | Python 3.14 路径 |
 | `PublicPort` | 总入口端口，默认 `8799` |
-| `SakuraRegion` | 当前节点地区 |
+| `SakuraRegion` | 手动切换时的默认地区 |
+| `SakuraSelectionRegions` | 自动测速和选择的地区池，当前为美国、新加坡 |
 | `CompanyDomains` | 公司域名后缀，默认空 |
 | `CompanyDns` | 公司 DNS，默认空 |
 | `CompanyProbeHosts` | 公司健康检查主机，默认空 |
@@ -109,12 +110,11 @@ settings.local.json
 
 ## 节点选择
 
-项目同时使用两层选择：
+自动选择是一个美国和新加坡共同参与的候选池：每 60 分钟测量 `SakuraSelectionRegions` 中的全部非倍消耗节点，按实际下载吞吐排序，RTT 用于同速时的平手判断；最终选择通过 HTTPS、TUN 和 ChatGPT 检查的节点。美国没有优先权，新加坡更快时可以直接选中新加坡。
 
-1. 当前地区每 60 分钟完整测速，选择可达节点。
-2. 每 5 分钟检查当前节点；失效时重新选线。
+每 5 分钟通过当前节点下载 64 KiB 健康样本，并检查 ChatGPT 可达性。当前低吞吐门槛为 **50 KB/s（400 Kbps）**；连续两次低于 `SakuraMinimumThroughputKBps`、连续两次无法访问 ChatGPT，或出现断流时，会重新测速整个美国和新加坡候选池；切换后继续观察两轮，没有恢复服务或明显改善就回到原节点。其他地区不会进入自动选择；名称含“倍消耗”的节点始终排除。
 
-同一节点有多个入口 IP 时，项目会先在物理网卡上测试 TCP + TLS，再只把健康入口放入配置。入口每 5 分钟检查，候选全集每 60 分钟刷新。名称带“5倍消耗”的节点默认排除。
+同一节点有多个入口 IP 时，项目会先在物理网卡上测试 TCP + TLS，再只把健康入口放入配置。入口每 5 分钟检查，候选全集每 60 分钟刷新。名称带“5倍消耗”的节点默认排除。健康状态记录在 `state/sakura-health.json`。
 
 ## 服务地址
 
