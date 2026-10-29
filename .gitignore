@@ -14,9 +14,8 @@
 /gateway/*.local.json
 /tools/network/
 
-# Runtime state and secrets; the Codex model catalog is deployable configuration
+# Runtime state and secrets; third-party model configuration lives in gateway/
 /state/*
-!/state/codex-models.json
 
 # Bundled binary is installed from bin/source.json
 /bin/*

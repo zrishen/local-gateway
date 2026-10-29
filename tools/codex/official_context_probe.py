@@ -20,7 +20,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--padding-tokens', type=int, default=780000)
     args = parser.parse_args()
-    catalog = json.loads((ROOT.parents[1] / 'state/codex-models.json').read_text(encoding='utf-8'))
+    catalog = json.loads((ROOT.parents[1] / 'state/codex-models.generated.json').read_text(encoding='utf-8'))
     for model in catalog['models']:
         if model['slug'] == 'gpt-6-luna':
             model['context_window'] = 872000

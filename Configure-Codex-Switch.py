@@ -1,13 +1,15 @@
 """Install/remove only the marked Codex gateway settings, preserving other config."""
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import secrets
+import sys
 import tomllib
 
 ROOT = Path(__file__).resolve().parent
-CODEX = Path.home() / '.codex'
+CODEX = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex')
 BACKUP = ROOT / 'work/codex-switch/backup'
 MARK = 'UNIFIED-CODEX-SWITCH'
 
@@ -49,9 +51,16 @@ def configure(rollback=False, env_only=False):
     if env_only:
         print('Prepared local gateway environment; active model configuration unchanged.')
         return
+    sys.path.insert(0, str(ROOT / 'gateway'))
+    from codex_catalog import CatalogSync
+    sync = CatalogSync(root=ROOT, local_path=ROOT / 'gateway/codex-api-models.json',
+                       auth_path=CODEX / 'auth.json')
+    status = sync.refresh()
+    if not status['ok']:
+        print('Official catalog sync deferred; cached/local choices remain available. See state/codex-catalog-sync.json.')
     settings = (f'# BEGIN {MARK}-SETTINGS\n'
                 'model_provider = "unified_local"\n'
-                'model_catalog_json = "C:/code/local-gateway/state/codex-models.json"\n'
+                f'model_catalog_json = "{sync.output_path.as_posix()}"\n'
                 f'# END {MARK}-SETTINGS\n')
     provider = (f'# BEGIN {MARK}-PROVIDER\n'
                 '[model_providers.unified_local]\n'

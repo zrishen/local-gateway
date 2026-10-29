@@ -76,4 +76,4 @@ sakura-region-us
 
 ## AI 路由
 
-模型菜单位于 `state/codex-models.json`。官方模型与第三方模型使用独立认证路线；第三方请求头采用白名单，避免把 ChatGPT 登录凭据转发给第三方。详细说明见 [CODEX.md](CODEX.md)。
+官方模型由 `gateway/codex_catalog.py` 自动同步，与 `gateway/codex-api-models.json` 中的第三方模型合并生成 `state/codex-models.generated.json`。官方能力和模型清单不固定，同步失败时保留同一账号的最近成功缓存。官方模型与第三方模型使用独立认证路线；第三方请求头采用白名单，避免把 ChatGPT 登录凭据转发给第三方。详细说明见 [CODEX.md](CODEX.md)。

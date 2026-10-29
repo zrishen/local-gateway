@@ -104,7 +104,7 @@ AI 上游连接超时为 12 秒，连接成功后的读超时为 600 秒。连�
 
 ## 模型目录
 
-模型菜单在 `state/codex-models.json`，模型路由代码在 `gateway/codex_router.py`。修改后重启 Codex，并使用新聊天验证。详细限制见 [CODEX.md](CODEX.md)。
+官方模型按北京时间每天 09:10、18:00 自动同步，停机错过时段后补同步一次；第三方模型在 `gateway/codex-api-models.json` 维护，合并菜单生成到 `state/codex-models.generated.json`。同步状态见 `state/codex-catalog-sync.json`，需要立即刷新可运行 `python -B .\gateway\codex_catalog.py --force`。Codex 的 `model_catalog_json` 应指向生成菜单，更新后重启 Codex，并使用新聊天验证。详细限制见 [CODEX.md](CODEX.md)。
 
 ## 恢复
 

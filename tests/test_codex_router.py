@@ -40,6 +40,7 @@ class CodexRouterTests(unittest.TestCase):
         Upstream.seen = []
         self.upstream = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Upstream)
         router = cr.Router(root / 'models', root / 'secret', self.upstream.server_port, root / 'events')
+        self.router = router
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -138,8 +139,8 @@ class CodexRouterTests(unittest.TestCase):
         self.assertNotIn('content-encoding', Upstream.seen[-1][1])
         self.assertEqual(Upstream.seen[-1][2]['model'], 'gpt-6.1-sol')
 
-    def test_unknown_model_never_falls_through_to_other_provider(self):
-        self.assertEqual(self.request('unconfigured-model')[0], 400)
+    def test_unknown_third_party_model_never_falls_through_to_other_provider(self):
+        self.assertEqual(self.request('unconfigured/model')[0], 400)
         self.assertEqual(Upstream.seen, [])
 
     def test_api_luna_omits_reserved_imagegen_but_keeps_other_tools(self):
@@ -149,6 +150,27 @@ class CodexRouterTests(unittest.TestCase):
     def test_third_party_compact_does_not_reach_official(self):
         self.assertEqual(self.request('ds/deepseek-v4.1-flash', '/codex/responses/compact')[0], 400)
         self.assertEqual(Upstream.seen, [])
+
+    def test_official_inference_does_not_depend_on_catalog(self):
+        with patch.object(self.router, 'catalog', side_effect=OSError('synthetic')):
+            status, _ = self.request('gpt-6.1-terra')
+        self.assertEqual(status, 200)
+        self.assertEqual(Upstream.seen[-1][2]['model'], 'gpt-6.1-terra')
+        self.assertEqual(Upstream.seen[-1][1]['authorization'], 'Bearer official-chatgpt-token')
+
+
+    def test_invalid_catalog_returns_service_unavailable_for_menu(self):
+        with patch.object(self.router, 'catalog', side_effect=OSError('synthetic')):
+            status, body = self.request(path='/codex/models')
+        self.assertEqual(status, 503)
+        self.assertIn('catalog is unavailable', json.loads(body)['error']['message'])
+
+
+    def test_new_official_model_is_validated_by_official_service(self):
+        self.assertEqual(self.request('gpt-future-official-model')[0], 200)
+        self.assertEqual(Upstream.seen[-1][0], '/backend-api/codex/responses')
+        self.assertEqual(Upstream.seen[-1][2]['model'], 'gpt-future-official-model')
+
 
 
 if __name__ == '__main__':

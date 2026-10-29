@@ -1,0 +1,246 @@
+{
+  "models": [
+    {
+      "additional_speed_tiers": [],
+      "availability_nux": null,
+      "base_instructions": "You are Codex, a coding agent. You and the user share the same workspace and collaborate to achieve the user's goals.",
+      "context_window": 500000,
+      "default_reasoning_level": "max",
+      "default_reasoning_summary": "none",
+      "description": "Third-party API through local unified gateway",
+      "display_name": "DeepSeek-V4.1-Flash (API)",
+      "effective_context_window_percent": 95,
+      "experimental_supported_tools": [],
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "max_context_window": 500000,
+      "priority": 1006,
+      "service_tiers": [],
+      "shell_type": "shell_command",
+      "slug": "ds/deepseek-v4.1-flash",
+      "support_verbosity": false,
+      "supported_in_api": true,
+      "supported_reasoning_levels": [
+        {
+          "effort": "high",
+          "description": "Provider reasoning (verified)"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum provider reasoning (verified)"
+        }
+      ],
+      "supports_image_detail_original": false,
+      "supports_parallel_tool_calls": false,
+      "supports_reasoning_summaries": false,
+      "supports_search_tool": true,
+      "truncation_policy": {
+        "limit": 10000,
+        "mode": "bytes"
+      },
+      "upgrade": null,
+      "visibility": "list"
+    },
+    {
+      "additional_speed_tiers": [],
+      "availability_nux": null,
+      "base_instructions": "You are Codex, a coding agent. You and the user share the same workspace and collaborate to achieve the user's goals.",
+      "context_window": 500000,
+      "default_reasoning_level": "max",
+      "default_reasoning_summary": "none",
+      "description": "Third-party API through local unified gateway",
+      "display_name": "GLM-5.3 (API)",
+      "effective_context_window_percent": 95,
+      "experimental_supported_tools": [],
+      "input_modalities": [
+        "text"
+      ],
+      "max_context_window": 500000,
+      "priority": 1007,
+      "service_tiers": [],
+      "shell_type": "shell_command",
+      "slug": "glm-req/glm-5.3",
+      "support_verbosity": false,
+      "supported_in_api": true,
+      "supported_reasoning_levels": [
+        {
+          "effort": "high",
+          "description": "Provider reasoning"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum provider reasoning (verified)"
+        }
+      ],
+      "supports_image_detail_original": false,
+      "supports_parallel_tool_calls": false,
+      "supports_reasoning_summaries": false,
+      "supports_search_tool": true,
+      "truncation_policy": {
+        "limit": 10000,
+        "mode": "bytes"
+      },
+      "upgrade": null,
+      "visibility": "list"
+    },
+    {
+      "additional_speed_tiers": [],
+      "availability_nux": null,
+      "base_instructions": "You are Codex, a coding agent. You and the user share the same workspace and collaborate to achieve the user's goals.",
+      "context_window": 500000,
+      "default_reasoning_level": "max",
+      "default_reasoning_summary": "none",
+      "description": "Third-party API through local unified gateway",
+      "display_name": "GLM-5.3-Flash (API)",
+      "effective_context_window_percent": 95,
+      "experimental_supported_tools": [],
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "max_context_window": 500000,
+      "priority": 1008,
+      "service_tiers": [],
+      "shell_type": "shell_command",
+      "slug": "glm-req/glm-5.3-flash",
+      "support_verbosity": false,
+      "supported_in_api": true,
+      "supported_reasoning_levels": [
+        {
+          "effort": "high",
+          "description": "Provider reasoning"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum provider reasoning (verified)"
+        }
+      ],
+      "supports_image_detail_original": false,
+      "supports_parallel_tool_calls": false,
+      "supports_reasoning_summaries": false,
+      "supports_search_tool": true,
+      "truncation_policy": {
+        "limit": 10000,
+        "mode": "bytes"
+      },
+      "upgrade": null,
+      "visibility": "list"
+    },
+    {
+      "additional_speed_tiers": [],
+      "availability_nux": null,
+      "base_instructions": "You are Codex, a coding agent. You and the user share the same workspace and collaborate to achieve the user's goals.",
+      "context_window": 500000,
+      "default_reasoning_level": "high",
+      "default_reasoning_summary": "none",
+      "description": "Third-party API through local unified gateway",
+      "display_name": "Gemini-3.8-Flash (API)",
+      "effective_context_window_percent": 95,
+      "experimental_supported_tools": [],
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "max_context_window": 500000,
+      "priority": 1009,
+      "service_tiers": [],
+      "shell_type": "shell_command",
+      "slug": "google/gemini-3.8-flash",
+      "support_verbosity": false,
+      "supported_in_api": true,
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Provider reasoning (verified)"
+        },
+        {
+          "effort": "medium",
+          "description": "Provider reasoning (verified)"
+        },
+        {
+          "effort": "high",
+          "description": "Provider reasoning (verified)"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Provider reasoning (verified)"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum provider reasoning (verified)"
+        }
+      ],
+      "supports_image_detail_original": false,
+      "supports_parallel_tool_calls": false,
+      "supports_reasoning_summaries": false,
+      "supports_search_tool": true,
+      "truncation_policy": {
+        "limit": 10000,
+        "mode": "bytes"
+      },
+      "upgrade": null,
+      "visibility": "list"
+    },
+    {
+      "additional_speed_tiers": [],
+      "availability_nux": null,
+      "base_instructions": "You are Codex, a coding agent. You and the user share the same workspace and collaborate to achieve the user's goals.",
+      "context_window": 500000,
+      "default_reasoning_level": "high",
+      "default_reasoning_summary": "none",
+      "description": "Third-party API through local unified gateway",
+      "display_name": "GPT-6-Luna (API)",
+      "effective_context_window_percent": 95,
+      "experimental_supported_tools": [],
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "max_context_window": 500000,
+      "priority": 1010,
+      "service_tiers": [],
+      "shell_type": "shell_command",
+      "slug": "openai/gpt-6-luna",
+      "support_verbosity": false,
+      "supported_in_api": true,
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Provider reasoning (matches official GPT-6-Luna)"
+        },
+        {
+          "effort": "medium",
+          "description": "Provider reasoning (matches official GPT-6-Luna)"
+        },
+        {
+          "effort": "high",
+          "description": "Provider reasoning (matches official GPT-6-Luna)"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Provider reasoning (matches official GPT-6-Luna)"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum provider reasoning"
+        },
+        {
+          "effort": "ultra",
+          "description": "Maximum provider reasoning with automatic task delegation"
+        }
+      ],
+      "supports_image_detail_original": false,
+      "supports_parallel_tool_calls": false,
+      "supports_reasoning_summaries": false,
+      "supports_search_tool": true,
+      "truncation_policy": {
+        "limit": 10000,
+        "mode": "bytes"
+      },
+      "upgrade": null,
+      "visibility": "list"
+    }
+  ]
+}

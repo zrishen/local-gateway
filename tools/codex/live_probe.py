@@ -41,7 +41,7 @@ def main():
     parser.add_argument('--shell-test', action='store_true')
     args = parser.parse_args()
     overrides = [f'openai_base_url="http://127.0.0.1:{args.port}/codex"',
-                 'model_catalog_json="C:/code/local-gateway/state/codex-models.json"',
+                 'model_catalog_json="C:/code/local-gateway/state/codex-models.generated.json"',
                  'model_providers.openai.env_http_headers={"X-Unified-Codex-Key"="UNIFIED_CODEX_GATEWAY_KEY"}',
                  'features.apps=false']
     # Built-in provider IDs are reserved; a dedicated provider is used if the

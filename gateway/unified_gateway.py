@@ -150,6 +150,9 @@ def main():
         settings['MixedPort'] = args.mixed_port
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     if not args.no_monitor:
+        from codex_catalog import CatalogSync
+        threading.Thread(target=CatalogSync().run, daemon=True,
+                         name='codex-model-catalog').start()
         from mode_monitor import ModeMonitor
         monitor = ModeMonitor(ROOT, settings)
         threading.Thread(target=monitor.run, daemon=True, name='sakura-mode-monitor').start()

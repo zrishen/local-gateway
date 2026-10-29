@@ -17,13 +17,13 @@ import threading
 import time
 import urllib.parse
 from tool_search_compat import ToolSearchCompat
+from codex_catalog import GENERATED_CATALOG, local_catalog
 
 ROOT = Path(__file__).resolve().parents[1]
 PREFIX = '/codex'
 OFFICIAL_HOST = 'chatgpt.com'
 OFFICIAL_BASE = '/backend-api/codex'
-API_MODELS = {'ds/deepseek-v4.1-flash', 'glm-req/glm-5.3',
-              'glm-req/glm-5.3-flash', 'google/gemini-3.8-flash', 'openai/gpt-6-luna'}
+API_MODELS = {model['slug'] for model in local_catalog()['models']}
 MAX_BODY = 32 * 1024 * 1024
 HOP_HEADERS = {'host', 'connection', 'transfer-encoding', 'content-length',
                'keep-alive', 'proxy-connection', 'proxy-authorization', 'upgrade',
@@ -111,7 +111,7 @@ def reply(handler, status, payload):
 
 class Router:
     def __init__(self, catalog_path=None, secret_path=None, api_port=8799, event_path=None):
-        self.catalog_path = Path(catalog_path or ROOT / 'state/codex-models.json')
+        self.catalog_path = Path(catalog_path or GENERATED_CATALOG)
         self.secret_path = Path(secret_path or ROOT / 'state/codex-router-secret.txt')
         self.api_port = api_port
         self.event_path = Path(event_path or ROOT / 'logs/codex-routes.jsonl')
@@ -135,7 +135,10 @@ class Router:
             return True
         path = parsed.path[len(PREFIX):]
         if method == 'GET' and path == '/models':
-            reply(handler, 200, self.catalog())
+            try:
+                reply(handler, 200, self.catalog())
+            except (OSError, ValueError, TypeError, KeyError):
+                reply(handler, 503, {'error': {'message': 'Codex model catalog is unavailable or invalid'}})
             return True
         if method != 'POST' or path not in ('/responses', '/responses/compact'):
             reply(handler, 404, {'error': {'message': 'Unsupported Codex router endpoint'}})
@@ -144,9 +147,13 @@ class Router:
             body = read_body(handler)
             data = json.loads(body)
             model = data.get('model', '')
-            known = {m['slug'] for m in self.catalog()['models']}
-            if model not in known:
-                reply(handler, 400, {'error': {'message': 'Model is not in the configured catalog'}})
+            if not isinstance(model, str) or not model:
+                reply(handler, 400, {'error': {'message': 'Codex model must be a non-empty string'}})
+                return True
+            # Official availability is decided by the service, not a stale menu.
+            # Namespaced third-party models require an explicit local route.
+            if '/' in model and model not in API_MODELS:
+                reply(handler, 400, {'error': {'message': 'Third-party model is not in the configured catalog'}})
                 return True
         except (ValueError, TypeError, AttributeError, OSError):
             reply(handler, 400, {'error': {'message': 'Invalid Codex request body or catalog'}})

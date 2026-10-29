@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class ModelCatalogTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.models = {m['slug']: m for m in json.loads((ROOT / 'state/codex-models.json').read_text(encoding='utf-8'))['models']}
+        cls.models = {m['slug']: m for m in json.loads((ROOT / 'gateway/codex-api-models.json').read_text(encoding='utf-8'))['models']}
 
     def levels(self, slug):
         return [item['effort'] for item in self.models[slug]['supported_reasoning_levels']]
@@ -34,7 +34,7 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertEqual(self.levels('google/gemini-3.8-flash'),
                          ['low', 'medium', 'high', 'xhigh', 'max'])
 
-    def test_all_models_use_475k_effective_context(self):
+    def test_third_party_models_use_475k_effective_context(self):
         for slug, model in self.models.items():
             with self.subTest(model=slug):
                 self.assertEqual(model['context_window'], 500000)
@@ -44,19 +44,9 @@ class ModelCatalogTests(unittest.TestCase):
                     model['context_window'] * model['effective_context_window_percent'] // 100,
                     475000)
 
-    def test_official_models_do_not_inherit_provider_max(self):
-        # The desktop Max toggle applies globally. Official entries must omit
-        # max so enabling it for DeepSeek cannot expose it on official models.
-        for slug, model in self.models.items():
-            if '/' in slug:
-                continue
-            with self.subTest(model=slug):
-                expected = ['low', 'medium', 'high', 'xhigh']
-                if slug in {'gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-sol',
-                            'gpt-5.6-sol', 'gpt-5.6-terra'}:
-                    expected.append('ultra')
-                self.assertEqual(self.levels(slug), expected)
-                self.assertEqual(model['default_reasoning_level'], 'high')
+    def test_local_catalog_contains_only_namespaced_third_party_models(self):
+        self.assertTrue(self.models)
+        self.assertTrue(all('/' in slug for slug in self.models))
 
 
 if __name__ == '__main__':
