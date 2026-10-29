@@ -72,7 +72,10 @@ def build_chat_request(rbody, clean_schema=None):
         if txt:
             messages.append({"role": "system", "content": txt})
 
-    for item in rbody.get("input") or []:
+    inputs = rbody.get("input") or []
+    if isinstance(inputs, str):
+        inputs = [inputs]
+    for item in inputs:
         if isinstance(item, str):
             messages.append({"role": "user", "content": item})
             continue
@@ -119,11 +122,15 @@ def build_chat_request(rbody, clean_schema=None):
         params = t.get("parameters") or (t.get("function") or {}).get("parameters") or {"type": "object", "properties": {}}
         if clean_schema is not None:
             params = clean_schema(params, [0])
-        tools.append({"type": "function", "function": {
+        function = {
             "name": name,
             "description": t.get("description") or (t.get("function") or {}).get("description") or "",
             "parameters": params,
-        }})
+        }
+        strict = t.get('strict', (t.get('function') or {}).get('strict'))
+        if strict is not None:
+            function['strict'] = strict
+        tools.append({'type': 'function', 'function': function})
 
     chat = {
         "model": rbody.get("model"),
@@ -141,6 +148,17 @@ def build_chat_request(rbody, clean_schema=None):
     for k in ("temperature", "top_p", "presence_penalty", "frequency_penalty"):
         if rbody.get(k) is not None:
             chat[k] = rbody[k]
+    effort = (rbody.get('reasoning') or {}).get('effort')
+    if effort is not None:
+        chat['reasoning_effort'] = effort
+    if 'parallel_tool_calls' in rbody:
+        chat['parallel_tool_calls'] = rbody['parallel_tool_calls']
+    format_spec = (rbody.get('text') or {}).get('format') or {}
+    if format_spec.get('type') == 'json_schema':
+        chat['response_format'] = {'type': 'json_schema', 'json_schema': {
+            k: v for k, v in format_spec.items() if k != 'type'}}
+    elif format_spec.get('type') == 'json_object':
+        chat['response_format'] = {'type': 'json_object'}
     return chat
 
 
@@ -195,9 +213,9 @@ def stream_events(chat_chunks, model, instructions):
             u = chunk["usage"]
             st.usage = {
                 "input_tokens": u.get("prompt_tokens", 0),
-                "input_tokens_details": {"cached_tokens": 0},
+                "input_tokens_details": {"cached_tokens": (u.get('prompt_tokens_details') or {}).get('cached_tokens', 0)},
                 "output_tokens": u.get("completion_tokens", 0),
-                "output_tokens_details": {"reasoning_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": (u.get('completion_tokens_details') or {}).get('reasoning_tokens', 0)},
                 "total_tokens": u.get("total_tokens", 0),
             }
         choices = chunk.get("choices") or []
@@ -256,6 +274,14 @@ def stream_events(chat_chunks, model, instructions):
                     "item_id": slot["id"], "output_index": slot["index"], "sequence_number": st.n()})
 
     # ---- 收尾 ----
+    if st.finish_reason not in ('stop', 'tool_calls', 'function_call', 'length', 'content_filter'):
+        response = st.response_obj('failed')
+        response['error'] = {'code': 'upstream_stream_incomplete',
+                             'message': 'Upstream stream ended without a completion marker'}
+        yield _sse('response.failed', {'type': 'response.failed', 'response': response,
+                                       'sequence_number': st.n()})
+        return
+    item_status = 'incomplete' if st.finish_reason in ('length', 'content_filter') else 'completed'
     if st.text_item is not None:
         item_id, text, idx = st.text_item["id"], st.text_item["text"], st.text_item["index"]
         yield _sse("response.output_text.done", {
@@ -266,7 +292,7 @@ def stream_events(chat_chunks, model, instructions):
             "output_index": idx,
             "part": {"type": "output_text", "annotations": [], "logprobs": [], "text": text},
             "sequence_number": st.n()})
-        item = {"type": "message", "id": item_id, "status": "completed",
+        item = {"type": "message", "id": item_id, "status": item_status,
                 "content": [{"type": "output_text", "annotations": [], "logprobs": [], "text": text}],
                 "phase": "final_answer", "role": "assistant"}
         st.output.append(item)
@@ -275,6 +301,9 @@ def stream_events(chat_chunks, model, instructions):
 
     for idx in sorted(st.tools):
         slot = st.tools[idx]
+        if item_status != 'completed':
+            # Never present truncated arguments as an executable tool call.
+            continue
         yield _sse("response.function_call_arguments.done", {
             "type": "response.function_call_arguments.done", "arguments": slot["args"],
             "item_id": slot["id"], "output_index": slot["index"], "sequence_number": st.n()})
@@ -285,5 +314,21 @@ def stream_events(chat_chunks, model, instructions):
             "type": "response.output_item.done", "item": item, "output_index": slot["index"],
             "sequence_number": st.n()})
 
-    yield _sse("response.completed", {
-        "type": "response.completed", "response": st.response_obj("completed"), "sequence_number": st.n()})
+    indices = {slot['id']: slot['index'] for slot in st.tools.values()}
+    if st.text_item:
+        indices[st.text_item['id']] = st.text_item['index']
+    st.output.sort(key=lambda item: indices[item['id']])
+
+    status, reason = 'completed', None
+    if st.finish_reason in ('length', 'content_filter'):
+        status = 'incomplete'
+        reason = 'max_output_tokens' if st.finish_reason == 'length' else 'content_filter'
+    elif st.finish_reason not in ('stop', 'tool_calls', 'function_call'):
+        status, reason = 'failed', 'upstream_stream_incomplete'
+    response = st.response_obj(status)
+    if status == 'incomplete':
+        response['incomplete_details'] = {'reason': reason}
+    elif status == 'failed':
+        response['error'] = {'code': reason, 'message': 'Upstream stream ended without a completion marker'}
+    event = 'response.' + status
+    yield _sse(event, {'type': event, 'response': response, 'sequence_number': st.n()})

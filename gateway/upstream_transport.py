@@ -14,7 +14,9 @@ import uuid
 
 EVENT_PATH = Path(__file__).resolve().parents[1] / 'logs/ai-upstream.jsonl'
 CONNECT_TIMEOUT = 12
-READ_TIMEOUT = 600
+HEADERS_TIMEOUT = 360
+STREAM_TIMEOUT = 360
+READ_TIMEOUT = HEADERS_TIMEOUT
 MAX_ATTEMPTS = 2
 RETRY_STATUSES = {502, 503, 504}
 _log_lock = threading.Lock()
@@ -45,14 +47,25 @@ class UpstreamUnavailable(Exception):
                           'cause': self.cause, 'attempts': self.attempts}}
 
 
-def request_upstream(factory, method, target, body, headers):
+def _set_timeout(conn, seconds):
+    try:
+        conn.sock.settimeout(float(seconds))
+    except (AttributeError, OSError, TypeError, ValueError):
+        pass
+
+
+def request_upstream(factory, method, target, body, headers,
+                     headers_timeout=None, stream_timeout=None):
     """Return (connection, response, request_id, attempts), transferring ownership.
 
     Transport failures retry only before sending the request. Ambiguous failures
     while sending/waiting are never replayed. Explicit 502/503/504 responses may
     retry once for inference POSTs and reads, before forwarding any headers/body.
+    Header wait and stream idle use separate budgets where configured.
     """
     request_id = uuid.uuid4().hex
+    headers_timeout = float(headers_timeout or READ_TIMEOUT)
+    stream_timeout = float(stream_timeout or READ_TIMEOUT)
     can_retry = method in {'GET', 'HEAD', 'POST'}
     for attempt in range(1, MAX_ATTEMPTS + 1):
         started = time.monotonic()
@@ -62,11 +75,12 @@ def request_upstream(factory, method, target, body, headers):
             conn = factory()
             conn.timeout = CONNECT_TIMEOUT
             conn.connect()
-            conn.sock.settimeout(READ_TIMEOUT)
+            _set_timeout(conn, headers_timeout)
             phase = 'send'
             conn.request(method, target, body=body, headers=headers)
             phase = 'headers'
             response = conn.getresponse()
+            _set_timeout(conn, stream_timeout)
         except (OSError, http.client.HTTPException, ValueError) as error:
             if conn:
                 conn.close()
@@ -81,15 +95,31 @@ def request_upstream(factory, method, target, body, headers):
                 raise UpstreamUnavailable(request_id, phase, cause, attempt) from None
         else:
             retry = can_retry and response.status in RETRY_STATUSES and attempt < MAX_ATTEMPTS
-            record_event({'request_id': request_id, 'attempt': attempt,
-                          'phase': phase, 'status': response.status, 'retry': retry,
-                          'seconds': round(time.monotonic() - started, 3)})
+            process_seconds = _process_seconds(response)
+            event = {'request_id': request_id, 'attempt': attempt,
+                     'phase': phase, 'status': response.status, 'retry': retry,
+                     'seconds': round(time.monotonic() - started, 3)}
+            if process_seconds is not None:
+                event['upstream_process_seconds'] = process_seconds
+            record_event(event)
             if not retry:
                 return conn, response, request_id, attempt
             # Do not wait for or expose a failed response's potentially slow body.
             response.close()
             conn.close()
         time.sleep(.5)
+
+
+def _process_seconds(response):
+    """Record upstream x-process-time as a number when it is milliseconds."""
+    try:
+        raw = response.getheader('x-process-time')
+        if not raw:
+            return None
+        value = float(str(raw).strip())
+        return round(value / 1000.0 if value > 1000 else value, 3)
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def error_payload(status, request_id, attempts):

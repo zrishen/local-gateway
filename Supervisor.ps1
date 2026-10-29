@@ -37,7 +37,11 @@ try {
     }
     $releaseDeadline = (Get-Date).AddSeconds(10)
     do {
-        $occupied = @(@($Settings.MixedPort, $Settings.DnsPort, $Settings.ControllerPort) | Where-Object { Test-TcpPort '127.0.0.1' $_ })
+        $requiredPorts = @($Settings.MixedPort, $Settings.DnsPort, $Settings.ControllerPort)
+        if ($Settings.CodexOfficialEnabled -and (Test-Path -LiteralPath (Join-Path $StateDir 'sakura-outbounds.json'))) {
+            $requiredPorts += [int]$Settings.CodexOfficialPort
+        }
+        $occupied = @($requiredPorts | Select-Object -Unique | Where-Object { Test-TcpPort '127.0.0.1' $_ })
         if ($occupied.Count -eq 0) { break }
         if ((Get-Date) -ge $releaseDeadline) { throw "Local ports are still occupied: $($occupied -join ', ')." }
         Start-Sleep -Milliseconds 250

@@ -98,6 +98,12 @@ class GatewayTests(unittest.TestCase):
         result=json.loads(self.request('GET','/v1/models?x=1'))
         self.assertEqual(result,{'path':'/upstream/v1/models?x=1','auth':'Bearer test-local-only'})
 
+    def test_private_backend_recognizes_stable_public_entry(self):
+        request = b'GET http://127.0.0.1:8799/v1/models HTTP/1.1\r\nHost: 127.0.0.1:8799\r\n\r\n'
+        self.assertEqual(unified_gateway.classify(request, 8799, 18801), 'ai')
+        internal = b'GET http://127.0.0.1:18801/__status HTTP/1.1\r\nHost: 127.0.0.1:18801\r\n\r\n'
+        self.assertEqual(unified_gateway.classify(internal, 8799, 18801), 'ai')
+
     def test_absolute_self_api_does_not_proxy_loop(self):
         result=json.loads(self.request('GET',f'http://127.0.0.1:{self.port}/v1/models'))
         self.assertEqual(result['path'],'/upstream/v1/models')

@@ -79,6 +79,14 @@ def upstream_health():
         return {'http_status': response.status}
 
 
+def tcp_open(port, host='127.0.0.1', timeout=.5):
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def real_dns(name, company=False, system=False):
     result = ({'rcode': 0, 'addresses': sorted({x[4][0] for x in socket.getaddrinfo(name,443,type=socket.SOCK_STREAM)})}
               if system else dns_query(name))
@@ -124,6 +132,11 @@ def main():
     ]
     if active_mode == 'Rule' and upstream_mode != 'subscription':
         jobs.append(('sakura-external', lambda: https_head('chatgpt.com', proxy_port=SETTINGS['SakuraPort'])))
+    official_port = int(SETTINGS.get('CodexOfficialPort', 12551))
+    if (SETTINGS.get('CodexOfficialEnabled', True)
+            and tcp_open(official_port)):
+        jobs.append(('codex-official', lambda: https_head(
+            'chatgpt.com', proxy_port=official_port)))
     if not args.preflight:
         company_probe_hosts = [str(x).strip() for x in SETTINGS.get('CompanyProbeHosts', []) if str(x).strip()]
         if not company_probe_hosts and SETTINGS.get('CompanyProbeHost'):

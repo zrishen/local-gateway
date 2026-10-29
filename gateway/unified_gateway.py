@@ -14,11 +14,25 @@ import socketserver
 import threading
 import time
 import urllib.parse
+from gateway_activity import ai_request, active_requests
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def classify(prefix, public_port):
+def _status_summary(name):
+    try:
+        value = json.loads((ROOT / 'state' / name).read_text(encoding='utf-8'))
+    except (OSError, ValueError, TypeError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    keys = ('ready', 'degraded', 'active_tag', 'tag', 'candidate_tag',
+            'region', 'score', 'health', 'next_scan_epoch', 'applied',
+            'last_probe_at', 'observed_epoch')
+    return {key: value.get(key) for key in keys if key in value}
+
+
+def classify(prefix, public_port, listen_port=None):
     if prefix[:1] == b'\x05':
         return 'proxy'
     if b'\n' not in prefix:
@@ -32,7 +46,10 @@ def classify(prefix, public_port):
     if raw_target.lower().startswith((b'http://', b'https://')):
         try:
             target = urllib.parse.urlsplit(raw_target.decode('ascii'))
-            if target.hostname in ('127.0.0.1', 'localhost', '::1') and target.port == public_port:
+            local_ports = {int(public_port)}
+            if listen_port is not None:
+                local_ports.add(int(listen_port))
+            if target.hostname in ('127.0.0.1', 'localhost', '::1') and target.port in local_ports:
                 return 'ai'
         except (ValueError, UnicodeError):
             return 'invalid'
@@ -61,11 +78,16 @@ def relay(client, mixed_port):
                         pass
 
 
-def make_handler(settings):
+def make_handler(settings, official_manager=None):
     import sanitize_proxy
     from codex_router import Router
-    sanitize_proxy.PORT = settings['PublicPort']
-    codex = Router(api_port=settings['PublicPort'])
+    # PublicPort is the stable client-facing entry. ListenPort is this
+    # particular backend's private socket, so third-party self-calls stay on
+    # the same process and do not bounce through the stable entry.
+    listen_port = int(settings.get('ListenPort') or settings['PublicPort'])
+    sanitize_proxy.PORT = int(settings['PublicPort'])
+    codex = Router(api_port=listen_port, settings=settings,
+                   official_manager=official_manager)
 
     class AIHandler(sanitize_proxy.Handler):
         server_version = 'unified-gateway/2'
@@ -88,7 +110,12 @@ def make_handler(settings):
                     state = json.loads((ROOT / 'state/mode.json').read_text())
                 except (OSError, ValueError):
                     state = {'mode': 'starting'}
-                body = json.dumps({'service': 'unified-gateway', **state}).encode()
+                body = json.dumps({
+                    'service': 'unified-gateway', **state,
+                    'active_ai_requests': max(0, active_requests() - 1),
+                    'codex_official': _status_summary('codex-official-route.json'),
+                    'sakura_route': _status_summary('sakura-selection.json'),
+                }).encode()
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Content-Length', str(len(body)))
@@ -102,6 +129,16 @@ def make_handler(settings):
                 return
             return super().do_POST()
 
+        def do_codex_method(self):
+            if codex.handle(self, self.command):
+                return
+            fallback = getattr(super(), 'do_' + self.command, None)
+            if fallback is not None:
+                return fallback()
+            self.send_error(501, 'Unsupported method')
+
+        do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = do_codex_method
+
     class Handler(socketserver.BaseRequestHandler):
         def handle(self):
             client = self.request
@@ -113,7 +150,7 @@ def make_handler(settings):
                     prefix = client.recv(8192, socket.MSG_PEEK)
                     if not prefix:
                         return
-                    kind = classify(prefix, settings['PublicPort'])
+                    kind = classify(prefix, settings['PublicPort'], listen_port)
                     if kind is None:
                         if len(prefix) >= 8192 or time.monotonic() >= deadline:
                             return
@@ -122,7 +159,8 @@ def make_handler(settings):
                     relay(client, settings['MixedPort'])
                 elif kind == 'ai':
                     client.settimeout(600)
-                    AIHandler(client, self.client_address, self.server)
+                    with ai_request():
+                        AIHandler(client, self.client_address, self.server)
                 else:
                     client.sendall(b'HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
             except (OSError, ValueError) as error:
@@ -145,10 +183,13 @@ def main():
     from settings_config import load_settings
     settings = load_settings(ROOT)
     if args.port:
-        settings['PublicPort'] = args.port
+        settings['ListenPort'] = args.port
+    else:
+        settings['ListenPort'] = settings['PublicPort']
     if args.mixed_port:
         settings['MixedPort'] = args.mixed_port
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+    official_manager = None
     if not args.no_monitor:
         from codex_catalog import CatalogSync
         threading.Thread(target=CatalogSync().run, daemon=True,
@@ -162,8 +203,17 @@ def main():
             threading.Thread(target=selector.run, daemon=True, name='sakura-latency-selector').start()
         except OSError as error:
             logging.warning('Sakura latency selector not started: %s', error)
-    with Server(('127.0.0.1', settings['PublicPort']), make_handler(settings)) as server:
-        logging.info('Unified AI/HTTP/SOCKS entry listening on 127.0.0.1:%d', settings['PublicPort'])
+        from official_route import OfficialRouteManager
+        try:
+            official_manager = OfficialRouteManager(ROOT, settings)
+            threading.Thread(target=official_manager.run, daemon=True,
+                             name='codex-official-route').start()
+        except (OSError, ValueError, TypeError) as error:
+            logging.warning('Official Codex route manager not started: %s', error)
+    with Server(('127.0.0.1', settings['ListenPort']),
+                make_handler(settings, official_manager)) as server:
+        logging.info('Unified AI/HTTP/SOCKS backend listening on 127.0.0.1:%d (entry %d)',
+                     settings['ListenPort'], settings['PublicPort'])
         server.serve_forever(poll_interval=.5)
 
 

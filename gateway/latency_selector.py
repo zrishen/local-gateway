@@ -8,6 +8,7 @@ passes real HTTPS and ChatGPT checks through the local gateway.
 import argparse
 import concurrent.futures
 import http.client
+from isolated_probes import IsolatedProbePool
 import json
 import logging
 import os
@@ -21,6 +22,8 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import route_policy
+from route_policy import classify_health
 
 PROBE_URLS = (
     'https://www.gstatic.com/generate_204',
@@ -49,12 +52,25 @@ def pick_lowest(results):
     return min(valid, key=lambda item: (item['delay'], item['tag'])) if valid else None
 
 
-def classify_health(result, minimum_throughput_kbps):
-    if not result.get('ok') or not result.get('complete'):
-        return 'disconnected'
-    if float(result.get('throughput_kbps', 0)) < minimum_throughput_kbps:
-        return 'low'
-    return 'healthy'
+def measured_throughput_kbps(result):
+    """Use end-to-end speed when available; fall back for legacy samples."""
+    value = result.get('effective_throughput_kbps')
+    if value is None:
+        value = result.get('throughput_kbps', 0)
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def measured_tun_throughput_kbps(result):
+    value = result.get('tun_effective_throughput_kbps')
+    if value is None:
+        value = result.get('tun_throughput_kbps', 0)
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def write_json(path, value):
@@ -79,6 +95,7 @@ class LatencySelector:
         self.timeout = timeout
         self.workers = workers
         self.minimum_throughput_kbps = max(0, int(settings.get('SakuraMinimumThroughputKBps', 50)))
+        self.policy = route_policy.policy_from_settings(settings)
         self.tun_validation = bool(settings.get('SakuraTunValidation', True))
         self.preferred_region = str(settings.get('SakuraRegion') or '美国')
         configured_regions = settings.get('SakuraSelectionRegions') or []
@@ -98,6 +115,8 @@ class LatencySelector:
         self.stop = threading.Event()
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         self.health_failures = 0
+        self.recovery_failures = 0
+        self.next_recovery_at = 0.0
         self.pending_switch = None
         self.rejected_candidates = {}
         self.last_health = {}
@@ -130,6 +149,14 @@ class LatencySelector:
             self.health_failures = max(0, int(value.get('consecutive_below_threshold', 0)))
         except (TypeError, ValueError):
             self.health_failures = 0
+        try:
+            self.recovery_failures = max(0, int(value.get('recovery_failures', 0)))
+        except (TypeError, ValueError):
+            self.recovery_failures = 0
+        try:
+            self.next_recovery_at = max(0.0, float(value.get('next_recovery_at', 0)))
+        except (TypeError, ValueError):
+            self.next_recovery_at = 0.0
         pending = value.get('pending_switch')
         self.pending_switch = pending if isinstance(pending, dict) else None
         rejected = value.get('rejected_candidates')
@@ -150,6 +177,8 @@ class LatencySelector:
         value = {
             'updated_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
             'consecutive_below_threshold': self.health_failures,
+            'recovery_failures': self.recovery_failures,
+            'next_recovery_at': self.next_recovery_at,
             'pending_switch': self.pending_switch,
             'rejected_candidates': self.rejected_candidates,
             'last_health': self.last_health,
@@ -159,19 +188,37 @@ class LatencySelector:
 
     def _reset_health_state(self, current=None):
         self.health_failures = 0
+        self.recovery_failures = 0
+        self.next_recovery_at = 0.0
         self.pending_switch = None
         self.last_health = {'tag': current} if current else {}
         self._save_health_state()
 
-    def _small_quality(self):
+    def _recovery_due(self):
+        return time.time() >= self.next_recovery_at
+
+    def _note_recovery_failure(self):
+        self.recovery_failures += 1
+        self.next_recovery_at = time.time() + route_policy.backoff_seconds(
+            self.recovery_failures, self.policy)
+        logging.info('Sakura health: recovery %d failed; next attempt in %d seconds',
+                     self.recovery_failures,
+                     max(0, int(self.next_recovery_at - time.time())))
+
+    def _note_recovery_success(self):
+        self.recovery_failures = 0
+        self.next_recovery_at = 0.0
+
+    def _small_quality(self, proxy_port=None):
         '''Measure a 64 KiB body through the local mixed proxy.
 
-        Body time excludes CONNECT/TLS setup so a high-RTT but usable node is
-        not classified as low throughput. A short/incomplete body is treated as
-        a stream interruption and can trigger recovery immediately.
+        Effective throughput includes proxy/TLS setup, first-byte wait, and the
+        transfer, and is the health threshold. Body throughput is retained as a
+        diagnostic for distinguishing slow setup from slow transfer. A
+        short/incomplete body is a stream interruption and triggers recovery.
         '''
         connection = http.client.HTTPSConnection(
-            '127.0.0.1', self.mixed_port, timeout=self.timeout,
+            '127.0.0.1', proxy_port or self.mixed_port, timeout=self.timeout,
             context=ssl.create_default_context())
         started = time.monotonic()
         try:
@@ -193,6 +240,9 @@ class LatencySelector:
                 'status': response.status,
                 'bytes': len(body),
                 'connect_ms': int((first_byte - started) * 1000),
+                'first_byte_ms': int((first_byte - started) * 1000),
+                'total_ms': int((ended - started) * 1000),
+                'effective_throughput_kbps': round(len(body) / max(.001, ended - started) / 1024, 1),
                 'throughput_kbps': throughput,
             }
         except (OSError, http.client.HTTPException, ValueError, ssl.SSLError) as error:
@@ -205,7 +255,10 @@ class LatencySelector:
             }
         finally:
             connection.close()
-        result['health'] = classify_health(result, self.minimum_throughput_kbps)
+        assessment = route_policy.assess(result, self.policy)
+        result['health'] = assessment['health']
+        result['score'] = assessment['score']
+        result['health_reasons'] = assessment['reasons']
         return result
 
     def _region_context(self, top):
@@ -275,12 +328,156 @@ class LatencySelector:
                 })
         return available_regions, members
 
-    def select_once(self):
+    def _member_for_tag(self, data, tag, fallback=None):
+        names = data.get('names') or {}
+        for region, info in (data.get('region_groups') or {}).items():
+            if tag in info.get('nodes', []):
+                return {'tag': tag, 'name': names.get(tag, tag),
+                        'region': region, 'group': info['group']}
+        if isinstance(fallback, dict):
+            return {**fallback, 'tag': tag,
+                    'name': fallback.get('name') or names.get(tag, tag)}
+        return {'tag': tag, 'name': names.get(tag, tag), 'region': '', 'group': ''}
+
+    def _recovery_candidates(self, current, info, data):
+        """Use the last full scan's shortlist instead of rescanning a region."""
+        selected = []
+        try:
+            snapshot = json.loads(
+                (self.root / 'state/sakura-selection.json').read_text(encoding='utf-8'))
+        except (OSError, ValueError, TypeError):
+            snapshot = {}
+        for item in snapshot.get('candidates') or []:
+            if not isinstance(item, dict):
+                continue
+            tag = item.get('tag')
+            if tag and tag != current and tag not in selected:
+                selected.append(tag)
+        for tag in info.get('nodes', []):
+            if tag != current and tag not in selected and '倍消耗' not in (
+                    (data.get('names') or {}).get(tag, tag)):
+                selected.append(tag)
+        members = []
+        for tag in [current] + selected[:3]:
+            item = self._member_for_tag(data, tag)
+            if item['group']:
+                members.append(item)
+        return members
+
+    def _route_view(self, item):
+        if not item:
+            return None
+        assessment = route_policy.assess(item, self.policy)
+        return {
+            'tag': item.get('tag'),
+            'name': item.get('name'),
+            'region': item.get('region'),
+            'group': item.get('group'),
+            'delay': item.get('delay', 0),
+            'ok': bool(item.get('ok')),
+            'complete': bool(item.get('complete', item.get('ok'))),
+            'stability': item.get('stability', 1.0),
+            'throughput_kbps': item.get('throughput_kbps', 0),
+            'effective_throughput_kbps': measured_throughput_kbps(item),
+            'first_byte_ms': item.get('first_byte_ms', 0),
+            'chatgpt_ok': item.get('chatgpt_ok', False),
+            'chatgpt_status': item.get('chatgpt_status'),
+            'chatgpt_ms': item.get('chatgpt_ms', 0),
+            'health': assessment['health'],
+            'score': assessment['score'],
+            'health_reasons': assessment['reasons'],
+        }
+
+    def _fallback_route(self, data, tag, region='', group=''):
+        if not tag:
+            return None
+        return {
+            'tag': tag,
+            'name': (data.get('names') or {}).get(tag, tag),
+            'region': region,
+            'group': group,
+            **self.last_health,
+        }
+
+    def _quality_verified(self, item):
+        if self.tun_validation and item.get('tun_download_ok') is not None:
+            return bool(item.get('tun_download_ok') and item.get('tun_chatgpt_ok')
+                        and measured_tun_throughput_kbps(item)
+                        >= self.policy.minimum_effective_kbps)
+        return bool(item.get('health') == 'healthy' and item.get('chatgpt_ok'))
+
+    def _write_selection(self, regions, active, candidate, ranked, applied,
+                         reachable, total, error=None):
+        active = active or {}
+        assessment = route_policy.assess(active, self.policy)
+        snapshot = {
+            'ok': error is None,
+            'regions': regions,
+            'region': active.get('region'),
+            'group': active.get('group'),
+            'tag': active.get('tag'),
+            'name': active.get('name'),
+            'delay': active.get('delay', 0),
+            'throughput_kbps': active.get('throughput_kbps', 0),
+            'effective_throughput_kbps': measured_throughput_kbps(active),
+            'first_byte_ms': active.get('first_byte_ms', 0),
+            'chatgpt_ok': active.get('chatgpt_ok', False),
+            'chatgpt_status': active.get('chatgpt_status'),
+            'chatgpt_ms': active.get('chatgpt_ms', 0),
+            'tun_verified': bool(active.get('tun_download_ok')),
+            'tun_throughput_kbps': active.get('tun_throughput_kbps', 0),
+            'tun_effective_throughput_kbps': measured_tun_throughput_kbps(active),
+            'tun_first_byte_ms': active.get('tun_first_byte_ms', 0),
+            'tun_chatgpt_ok': active.get('tun_chatgpt_ok', False),
+            'tun_chatgpt_ms': active.get('tun_chatgpt_ms', 0),
+            'quality_verified': self._quality_verified(active),
+            'minimum_throughput_kbps': self.minimum_throughput_kbps,
+            'minimum_effective_kbps': self.policy.minimum_effective_kbps,
+            'score': assessment['score'],
+            'health': assessment['health'],
+            'health_reasons': assessment['reasons'],
+            'applied': bool(applied),
+            'candidate': self._route_view(candidate),
+            'candidates': [self._route_view(item) for item in ranked[:5]],
+            'reachable': reachable,
+            'total': total,
+            'verified': error is None,
+            'probe_isolated': True,
+            'probe_samples': (candidate or {}).get('probe_samples', []),
+            'interval_seconds': self.interval,
+            'health_check_seconds': self.health_interval,
+            'health_probe_bytes': HEALTH_BYTES,
+            'health_failure_limit': HEALTH_FAILURE_LIMIT,
+            'tested_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
+        }
+        if error:
+            snapshot['error'] = error
+        if active.get('tag'):
+            snapshot['active_tag'] = active['tag']
+        if candidate and candidate.get('tag') != active.get('tag'):
+            snapshot['candidate_tag'] = candidate.get('tag')
+        write_json(self.root / 'state/sakura-selection.json', snapshot)
+        return snapshot
+
+    def select_once(self, candidates=None, apply=True):
         top = self.request('/proxies/sakura')
         if str(top.get('type', '')).lower() != 'selector':
             return None
         data = self.state()
-        if self.selection_regions:
+        if candidates is not None:
+            regions = list(self.selection_regions)
+            members = []
+            seen = set()
+            for item in candidates:
+                source = item if isinstance(item, dict) else None
+                tag = source.get('tag') if source else str(item)
+                if not tag or tag in seen:
+                    continue
+                seen.add(tag)
+                member = self._member_for_tag(data, tag, source)
+                if member.get('group'):
+                    members.append(member)
+        elif self.selection_regions:
             regions, members = self._selection_members(data)
         else:
             previous_region, previous_info, _ = self.active_region(top)
@@ -289,7 +486,7 @@ class LatencySelector:
             names = data.get('names') or {}
             regions = [region] if region else []
             members = [{'tag': tag, 'name': names.get(tag, tag), 'region': region,
-                        'group': info['group']} for tag in info.get('nodes', [])]
+                        'group': info.get('group')} for tag in info.get('nodes', [])]
         if not members:
             return None
 
@@ -299,7 +496,21 @@ class LatencySelector:
         if previous_group:
             group_state = self.request('/proxies/' + urllib.parse.quote(previous_group))
             previous = str(group_state.get('now') or '')
+        if previous and previous not in {item['tag'] for item in members}:
+            member = self._member_for_tag(data, previous, {
+                'name': (data.get('names') or {}).get(previous, previous),
+                'region': previous_region or '',
+                'group': previous_group,
+            })
+            if member.get('group'):
+                members.append(member)
+        previous_route = self._fallback_route(
+            data, previous, previous_region or '', previous_group)
 
+        members = [item for item in members if item['tag'] == previous
+                   or self.rejected_candidates.get(item['tag'], 0) <= time.time()]
+        if not members:
+            return None
         results = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(self.workers, len(members))) as pool:
             futures = {pool.submit(self.measure, item['tag']): item for item in members}
@@ -313,170 +524,150 @@ class LatencySelector:
                 results.append({**item, 'delay': delay})
 
         if not results:
-            if previous_group and previous:
-                try:
-                    self._set_top_region(previous_group)
-                    self._set_group(previous_group, previous)
-                except (OSError, http.client.HTTPException, ValueError):
-                    pass
-            write_json(self.root / 'state/sakura-selection.json', {
-                'ok': False,
-                'regions': regions,
-                'tested_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
-                'error': 'no reachable nodes',
-            })
+            self._write_selection(regions, previous_route, None, [], False, 0,
+                                  len(members), 'no reachable nodes')
             return None
 
         results.sort(key=lambda item: (item['delay'], item['tag']))
-        verified = []
-        for candidate in results:
-            try:
-                # Mixed proxy traffic follows the selected region. Test each
-                # candidate through its own group so US and Singapore compete
-                # on the same real transfer and ChatGPT checks.
-                self._set_top_region(candidate['group'])
-                self._set_group(candidate['group'], candidate['tag'])
-                quality = self.verify_through_proxy()
-                if quality.get('ok'):
-                    verified.append({**candidate, **quality})
-            except (OSError, http.client.HTTPException, ValueError, ssl.SSLError) as error:
-                logging.debug('Sakura quality probe %s failed: %s', candidate['tag'], error)
-
+        try:
+            verified = self._measure_candidates(results)
+        except (OSError, ValueError, KeyError) as error:
+            logging.warning('Isolated node probes unavailable: %s; keeping current route',
+                            type(error).__name__)
+            return None
+        for item in verified:
+            item.update(route_policy.assess(item, self.policy))
         chatgpt_ready = [item for item in verified if item.get('chatgpt_ok')]
-        pool = chatgpt_ready or verified
-        # Practical network speed is the verified response throughput; RTT is
-        # the tie breaker. This lets a faster Singapore node beat US directly.
-        ranked = sorted(pool, key=lambda item: (
+        ranked = sorted(chatgpt_ready, key=lambda item: (
+            item.get('score', 0), measured_throughput_kbps(item),
             item.get('throughput_kbps', 0), -item.get('delay', 0)), reverse=True)
         if not ranked:
-            if previous_group and previous:
-                try:
-                    self._set_top_region(previous_group)
-                    self._set_group(previous_group, previous)
-                except (OSError, http.client.HTTPException, ValueError):
-                    pass
-            write_json(self.root / 'state/sakura-selection.json', {
-                'ok': False,
-                'regions': regions,
-                'tested_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
-                'error': 'no node passed the end-to-end check',
-                'reachable': len(results),
-                'total': len(members),
-            })
+            self._write_selection(regions, previous_route, None, [], False,
+                                  len(results), len(members),
+                                  'no node passed the end-to-end check')
             return None
 
-        members_by_tag = {item['tag']: item for item in members}
-        finalists = []
-        if previous in members_by_tag:
-            current = next((item for item in results if item['tag'] == previous), None)
-            finalists.append(current or {**members_by_tag[previous], 'delay': 0})
-        for candidate in ranked:
-            if candidate['tag'] not in {item['tag'] for item in finalists}:
-                finalists.append(candidate)
-            if len(finalists) >= 3:
-                break
-
+        current = next((item for item in ranked if item['tag'] == previous), None)
         chosen = ranked[0]
-        if self.tun_validation and finalists:
-            tun_results = []
-            for candidate in finalists:
-                actual = self.verify_via_tun(candidate['tag'], candidate['group'])
-                if actual.get('tun_download_ok'):
-                    tun_results.append({**candidate, **actual})
-            if tun_results:
-                prefer_chatgpt = [item for item in tun_results if item.get('tun_chatgpt_ok')]
-                tun_pool = prefer_chatgpt or tun_results
-                chosen = max(tun_pool, key=lambda item: (
-                    item.get('tun_throughput_kbps', 0), -item.get('delay', 0)))
+        if not apply:
+            active = current or {
+                'tag': previous, 'name': previous, 'region': previous_region or '',
+                'group': previous_group,
+                **self.last_health,
+            }
+            self._write_selection(regions, active, chosen, ranked, False,
+                                  len(results), len(members))
+            return self._route_view(chosen)
 
-        self._set_top_region(chosen['group'])
-        self._set_group(chosen['group'], chosen['tag'])
-        snapshot = {
-            'ok': True,
-            'regions': regions,
-            'region': chosen['region'],
-            'group': chosen['group'],
-            'tag': chosen['tag'],
-            'name': chosen['name'],
-            'delay': chosen['delay'],
-            'throughput_kbps': chosen.get('throughput_kbps', 0),
-            'first_byte_ms': chosen.get('first_byte_ms', 0),
-            'chatgpt_ok': chosen.get('chatgpt_ok', False),
-            'chatgpt_status': chosen.get('chatgpt_status'),
-            'chatgpt_ms': chosen.get('chatgpt_ms', 0),
-            'tun_verified': bool(chosen.get('tun_download_ok')),
-            'tun_throughput_kbps': chosen.get('tun_throughput_kbps', 0),
-            'tun_first_byte_ms': chosen.get('tun_first_byte_ms', 0),
-            'tun_chatgpt_ok': chosen.get('tun_chatgpt_ok', False),
-            'tun_chatgpt_ms': chosen.get('tun_chatgpt_ms', 0),
-            'quality_verified': (bool(chosen.get('tun_download_ok') and chosen.get('tun_chatgpt_ok')
-                                      and chosen.get('tun_throughput_kbps', 0) >= self.minimum_throughput_kbps)
-                                 if self.tun_validation else
-                                 bool(chosen.get('throughput_kbps', 0) >= self.minimum_throughput_kbps
-                                      and chosen.get('chatgpt_ok'))),
-            'minimum_throughput_kbps': self.minimum_throughput_kbps,
-            'reachable': len(results),
-            'total': len(members),
-            'verified': True,
-            'interval_seconds': self.interval,
-            'health_check_seconds': self.health_interval,
-            'health_probe_bytes': HEALTH_BYTES,
-            'health_failure_limit': HEALTH_FAILURE_LIMIT,
-            'tested_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
-        }
-        write_json(self.root / 'state/sakura-selection.json', snapshot)
-        self._reset_health_state(chosen['tag'])
-        logging.info('Sakura selector: %s %s / %s (%s ms, %s KB/s)',
-                     chosen['region'], chosen['tag'], chosen['name'],
-                     chosen['delay'], chosen.get('throughput_kbps', 0))
+        if current is not None and chosen['tag'] == current['tag'] and not self.tun_validation:
+            logging.info('Sakura selector: keep %s/%s (already best, score %.3f)',
+                         current['region'], current['tag'], current.get('score', 0))
+            return self._write_selection(regions, current, chosen, ranked, False,
+                                          len(results), len(members))
+        if (current is not None and chosen['tag'] != current['tag']
+                and not route_policy.is_meaningfully_better(chosen, current, self.policy)):
+            logging.info('Sakura selector: keep %s/%s; %s not meaningfully better '
+                         '(score %.3f vs %.3f)', current['region'], current['tag'],
+                         chosen['tag'], chosen.get('score', 0), current.get('score', 0))
+            return self._write_selection(regions, current, chosen, ranked, False,
+                                          len(results), len(members))
+
+        finalists = [chosen] + [item for item in ranked[:3]
+                                if item['tag'] != chosen['tag']]
+        if current is not None and current['tag'] not in {item['tag'] for item in finalists}:
+            finalists.append(current)
+        selected = chosen
+        if self.tun_validation:
+            selected = None
+            for candidate in finalists[:3]:
+                try:
+                    self._set_group(candidate['group'], candidate['tag'])
+                    self._set_top_region(candidate['group'])
+                    actual = self.verify_via_tun(candidate['tag'], candidate['group'])
+                except (OSError, http.client.HTTPException, ValueError):
+                    continue
+                if actual.get('tun_download_ok') and actual.get('tun_chatgpt_ok'):
+                    selected = {**candidate, **actual}
+                    break
+            if selected is None:
+                if previous_group and previous:
+                    try:
+                        self._set_group(previous_group, previous)
+                        self._set_top_region(previous_group)
+                    except (OSError, http.client.HTTPException, ValueError):
+                        pass
+                self._write_selection(regions, previous_route, chosen, ranked,
+                                      False, len(results), len(members),
+                                      'no finalist passed the TUN check')
+                return None
+
+        self._set_group(selected['group'], selected['tag'])
+        self._set_top_region(selected['group'])
+        snapshot = self._write_selection(regions, selected, selected, ranked, True,
+                                         len(results), len(members))
+        self._reset_health_state(selected['tag'])
+        logging.info('Sakura selector: %s %s / %s (%s ms, effective %s KB/s, '
+                     'body %s KB/s, score %.3f)',
+                     selected['region'], selected['tag'], selected['name'],
+                     selected['delay'], measured_throughput_kbps(selected),
+                     selected.get('throughput_kbps', 0), selected.get('score', 0))
         return snapshot
 
-    def verify_through_proxy(self):
-        """Require a real HTTPS transfer before keeping a latency winner.
+    def _candidate_quality(self, port):
+        result = self._small_quality(proxy_port=port)
+        if result.get('ok'):
+            result.update(self.verify_chatgpt(proxy_port=port))
+        result['ok'] = bool(result.get('complete') and result.get('chatgpt_ok'))
+        return result
 
-        The selector first sorts by RTT, then accepts the first candidate that
-        clears the optional throughput floor. If every candidate is slow, the
-        fastest HTTPS-valid node is retained rather than leaving no route.
+    def _measure_candidates(self, candidates):
+        """Compare nodes without any production selector changes.
+
+        The best three receive three samples each. Median speed reduces the
+        influence of a lucky small transfer; downloads remain sequential so
+        the benchmark does not make candidates compete for local bandwidth.
         """
-        connection = http.client.HTTPSConnection('127.0.0.1', self.mixed_port,
-                                                 timeout=self.timeout,
-                                                 context=ssl.create_default_context())
-        started = time.monotonic()
-        try:
-            connection.set_tunnel(QUALITY_HOST, 443)
-            connection.request('GET', QUALITY_PATH, headers={'User-Agent': 'UnifiedSelector/2'})
-            response = connection.getresponse()
-            first_byte = time.monotonic()
-            if response.status not in (200, 204):
-                return {'ok': False, 'status': response.status}
-            body = response.read(QUALITY_BYTES + 1)
-            elapsed = max(.001, time.monotonic() - started)
-            result = {
-                'ok': len(body) > 0,
-                'status': response.status,
-                'bytes': len(body),
-                'first_byte_ms': int((first_byte - started) * 1000),
-                'throughput_kbps': int(len(body) / elapsed / 1024),
-            }
-            if result['ok']:
-                chatgpt = self.verify_chatgpt()
-                result.update(chatgpt)
-                if not chatgpt.get('ok'):
-                    result['ok'] = False
-            return result
-        except (OSError, http.client.HTTPException, ssl.SSLError) as error:
-            return {'ok': False, 'error': type(error).__name__}
-        finally:
-            connection.close()
+        verified = []
+        with IsolatedProbePool(self.root, [item['tag'] for item in candidates]) as probes:
+            for candidate in candidates:
+                quality = self._candidate_quality(probes.ports[candidate['tag']])
+                if quality.get('ok'):
+                    verified.append({**candidate, **quality})
+            verified.sort(key=lambda item: (
+                measured_throughput_kbps(item), item.get('throughput_kbps', 0)), reverse=True)
+            for candidate in verified[:3]:
+                samples = [dict(candidate)] + [self._candidate_quality(probes.ports[candidate['tag']])
+                                         for _ in range(2)]
+                successful = [item for item in samples if item.get('ok')]
+                candidate['ok'] = len(successful) >= 2
+                candidate['effective_throughput_kbps'] = statistics.median(
+                    [measured_throughput_kbps(item) if item.get('ok') else 0
+                     for item in samples])
+                candidate['throughput_kbps'] = statistics.median(
+                    [float(item.get('throughput_kbps', 0)) if item.get('ok') else 0
+                     for item in samples])
+                candidate['first_byte_ms'] = statistics.median(
+                    [float(item.get('first_byte_ms', 0)) if item.get('ok') else 0
+                     for item in samples])
+                candidate['probe_samples'] = [
+                    {'ok': item.get('ok', False),
+                     'effective_throughput_kbps': item.get('effective_throughput_kbps', 0),
+                     'throughput_kbps': item.get('throughput_kbps', 0),
+                     'first_byte_ms': item.get('first_byte_ms', 0)}
+                    for item in samples]
+        return [item for item in verified if item.get('ok')]
 
-    def verify_chatgpt(self):
+    def verify_through_proxy(self):
+        return self._candidate_quality(self.mixed_port)
+
+    def verify_chatgpt(self, proxy_port=None):
         """Verify the route used by the bundled ChatGPT client.
 
         `/robots.txt` is a stable small response. The site root may legitimately
         return a challenge or 403 and is therefore unsuitable as a reachability
         test.
         """
-        connection = http.client.HTTPSConnection('127.0.0.1', self.mixed_port,
+        connection = http.client.HTTPSConnection('127.0.0.1', proxy_port or self.mixed_port,
                                                  timeout=self.timeout,
                                                  context=ssl.create_default_context())
         started = time.monotonic()
@@ -505,8 +696,8 @@ class LatencySelector:
         switching every live connection. The two finalists are then checked
         through the system TUN, which is the path users actually consume.
         """
-        self._set_top_region(group)
         self._set_group(group, tag)
+        self._set_top_region(group)
         if os.name == 'nt':
             try:
                 subprocess.run(['ipconfig', '/flushdns'], capture_output=True,
@@ -516,7 +707,7 @@ class LatencySelector:
         download = self._https_via_tun(
             'speed.cloudflare.com',
             f'/__down?bytes=131072&selector={time.time_ns()}',
-            self.timeout, 131072)
+            self.timeout, 131072, expected_bytes=131072)
         chatgpt_attempts = [
             self._https_via_tun('chatgpt.com', '/robots.txt', min(self.timeout, 8), 8192)
             for _ in range(2)
@@ -528,6 +719,7 @@ class LatencySelector:
             'tun_download_ok': download.get('ok', False),
             'tun_download_status': download.get('status'),
             'tun_throughput_kbps': download.get('throughput_kbps', 0),
+            'tun_effective_throughput_kbps': download.get('effective_throughput_kbps', 0),
             'tun_first_byte_ms': download.get('first_byte_ms', 0),
             'tun_tls_ms': download.get('tls_ms', 0),
             'tun_download_error': download.get('error'),
@@ -540,67 +732,42 @@ class LatencySelector:
                                         if item.get('error')), None),
         }
 
-    def _https_via_tun(self, host, path, timeout, limit):
-        connection = None
+    def _https_via_tun(self, host, path, timeout, limit, expected_bytes=None):
+        connection = http.client.HTTPSConnection(host, timeout=timeout,
+                                                 context=ssl.create_default_context())
         started = time.monotonic()
         try:
-            infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
-            resolved = sorted({item[4][0] for item in infos})
-            tcp_started = time.monotonic()
-            connection = socket.create_connection((host, 443), timeout=timeout)
-            tcp_done = time.monotonic()
-            secure = ssl.create_default_context().wrap_socket(connection, server_hostname=host)
-            connection = secure
-            tls_done = time.monotonic()
-            request = (f'GET {path} HTTP/1.1\r\nHost: {host}\r\n'
-                       'User-Agent: UnifiedSelectorTUN/1\r\nConnection: close\r\n\r\n')
-            secure.sendall(request.encode('ascii'))
-            data = b''
-            while b'\r\n\r\n' not in data:
-                chunk = secure.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
+            connection.request('GET', path, headers={
+                'User-Agent': 'UnifiedSelectorTUN/2', 'Accept-Encoding': 'identity',
+                'Connection': 'close'})
+            response = connection.getresponse()
             first = time.monotonic()
-            status = int(data.split(b' ', 2)[1]) if data.startswith(b'HTTP/') else 0
-            body = data.split(b'\r\n\r\n', 1)[1] if b'\r\n\r\n' in data else b''
-            while len(body) < limit:
-                chunk = secure.recv(65536)
-                if not chunk:
-                    break
-                body += chunk
+            # HTTPResponse decodes chunked transfer framing and detects
+            # truncated Content-Length bodies; raw recv() did neither.
+            body = response.read(limit + 1)
             end = time.monotonic()
-            elapsed = max(.001, end - started)
+            complete = (len(body) == expected_bytes if expected_bytes is not None else bool(body))
             return {
-                'ok': status in (200, 204),
-                'status': status,
-                'resolved': resolved[:4],
-                'tls_ms': int((tls_done - tcp_done) * 1000),
+                'ok': response.status == 200 and complete,
+                'complete': complete,
+                'status': response.status,
                 'first_byte_ms': int((first - started) * 1000),
-                'total_ms': int(elapsed * 1000),
+                'total_ms': int((end - started) * 1000),
                 'bytes': len(body),
-                'throughput_kbps': int(len(body) / elapsed / 1024),
+                'throughput_kbps': round(len(body) / max(.001, end - first) / 1024, 1),
+                'effective_throughput_kbps': round(len(body) / max(.001, end - started) / 1024, 1),
             }
-        except (OSError, ValueError, ssl.SSLError) as error:
-            return {'ok': False, 'error': type(error).__name__,
+        except (OSError, ValueError, http.client.HTTPException) as error:
+            return {'ok': False, 'complete': False, 'error': type(error).__name__,
                     'elapsed_ms': int((time.monotonic() - started) * 1000)}
         finally:
-            if connection is not None:
-                try:
-                    connection.close()
-                except OSError:
-                    pass
+            connection.close()
 
     @staticmethod
     def _meaningfully_better(candidate, baseline):
-        if candidate.get('health') != 'healthy':
-            return False
-        measured = float(candidate.get('throughput_kbps', 0))
-        required = float(baseline.get('throughput_kbps', 0))
-        if required < HEALTH_IMPROVEMENT_KBPS:
-            return measured >= HEALTH_IMPROVEMENT_KBPS
-        return (measured - required >= HEALTH_IMPROVEMENT_KBPS
-                and measured >= required * HEALTH_IMPROVEMENT_RATIO)
+        """Compatibility wrapper; new code passes the route policy explicitly."""
+        return route_policy.is_meaningfully_better(candidate, baseline,
+                                                   route_policy.DEFAULT_POLICY)
 
     def _set_group(self, group, tag):
         self.request('/proxies/' + urllib.parse.quote(group), 'PUT', {'name': tag})
@@ -696,7 +863,8 @@ class LatencySelector:
                 self._set_group(info['group'], tag)
                 quality = self._small_quality()
                 if (quality.get('health') != 'healthy'
-                        or float(quality.get('throughput_kbps', 0)) < self.minimum_throughput_kbps):
+                        or measured_throughput_kbps(quality)
+                        < self.policy.minimum_effective_kbps):
                     if quality.get('health') == 'disconnected':
                         self.rejected_candidates[tag] = time.time() + HEALTH_REJECTION_SECONDS
                     continue
@@ -704,8 +872,10 @@ class LatencySelector:
                 if not chatgpt.get('ok'):
                     self.rejected_candidates[tag] = time.time() + HEALTH_REJECTION_SECONDS
                     continue
-                logging.info('Sakura health: cross-region fallback %s/%s (%s ms, %s KB/s)',
-                             region, tag, candidate['delay'], quality.get('throughput_kbps', 0))
+                logging.info('Sakura health: cross-region fallback %s/%s '
+                             '(%s ms, effective %s KB/s, body %s KB/s)',
+                             region, tag, candidate['delay'],
+                             measured_throughput_kbps(quality), quality.get('throughput_kbps', 0))
                 return {'region': region, 'group': info['group'],
                         'tag': tag, 'name': names.get(tag, tag), **candidate,
                         **quality, **chatgpt}
@@ -737,7 +907,8 @@ class LatencySelector:
             try:
                 self._set_group(info['group'], tag)
                 quality = self._small_quality()
-                if not self._meaningfully_better(quality, baseline):
+                if not route_policy.is_meaningfully_better(
+                        quality, baseline, self.policy):
                     if quality.get('health') == 'disconnected':
                         self.rejected_candidates[tag] = time.time() + HEALTH_REJECTION_SECONDS
                     continue
@@ -753,8 +924,20 @@ class LatencySelector:
         return None
 
     def _begin_pending_switch(self, region, info, current, chosen, baseline):
-        self._set_top_region(chosen['group'])
         self._set_group(chosen['group'], chosen['tag'])
+        self._set_top_region(chosen['group'])
+        baseline_result = {
+            key: baseline.get(key) for key in (
+                'ok', 'complete', 'chatgpt_ok', 'effective_throughput_kbps',
+                'throughput_kbps', 'first_byte_ms', 'stability', 'health')
+            if key in baseline
+        }
+        if 'ok' not in baseline_result:
+            baseline_result['ok'] = baseline.get('health') != 'disconnected'
+        if 'complete' not in baseline_result:
+            baseline_result['complete'] = baseline_result['ok']
+        if 'chatgpt_ok' not in baseline_result:
+            baseline_result['chatgpt_ok'] = baseline.get('health') != 'blocked'
         self.pending_switch = {
             'previous_region': region,
             'previous_group': info['group'],
@@ -763,37 +946,59 @@ class LatencySelector:
             'switched_group': chosen['group'],
             'switched_tag': chosen['tag'],
             'cross_region': chosen['region'] != region,
-            'baseline_kbps': float(baseline.get('throughput_kbps', 0)),
+            'baseline_kbps': measured_throughput_kbps(baseline),
             'baseline_health': baseline.get('health', 'disconnected'),
+            'baseline': baseline_result,
             'samples': [],
             'started_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
         }
         self.health_failures = 0
+        self._note_recovery_success()
         logging.info(
-            'Sakura health: switch %s/%s -> %s/%s (%s KB/s); observing two rounds',
+            'Sakura health: switch %s/%s -> %s/%s '
+            '(effective %s KB/s, body %s KB/s); observing two rounds',
             region, current, chosen['region'], chosen['tag'],
-            chosen.get('throughput_kbps', 0))
+            measured_throughput_kbps(chosen), chosen.get('throughput_kbps', 0))
         return {'action': 'switch', **chosen, 'previous_region': region,
                 'previous_tag': current}
 
     def _recover_current(self, region, info, data, current, baseline):
         if self.selection_regions:
-            # A failed current node gets the same full US/Singapore comparison
-            # as a periodic scan. There is no US-first recovery preference.
-            selected = self.select_once()
+            # Targeted recovery: compare the live node with the last scan's
+            # shortlist only. A failed node no longer triggers a full US/SG
+            # rescan, and candidate probes never change the production route.
+            members = self._recovery_candidates(current, info, data)
+            selected = self.select_once(candidates=members, apply=False)
             if selected:
+                baseline_health = baseline.get('health', 'disconnected')
+                eligible = (baseline_health in ('blocked', 'disconnected')
+                            and bool(selected.get('ok') and selected.get('chatgpt_ok')))
+                if not eligible and selected.get('tag') != current:
+                    eligible = route_policy.is_meaningfully_better(
+                        selected, baseline, self.policy)
                 if selected.get('tag') == current:
+                    self._note_recovery_success()
                     return {'action': 'keep', **selected}
-                # The pool scan identifies the fastest node. Keep the existing
-                # two-round confirmation before accepting that health recovery.
-                return self._begin_pending_switch(
-                    region, info, current, selected, baseline)
+                if eligible:
+                    # Keep two-round observation before accepting recovery.
+                    return self._begin_pending_switch(
+                        region, info, current, selected, baseline)
+                try:
+                    self._set_top_region(info['group'])
+                    self._set_group(info['group'], current)
+                except (OSError, http.client.HTTPException, ValueError):
+                    pass
+                self._note_recovery_failure()
+                return {'action': 'keep', 'region': region, 'tag': current,
+                        'reason': 'candidate did not meaningfully improve a working route'}
             try:
                 self._set_top_region(info['group'])
                 self._set_group(info['group'], current)
             except (OSError, http.client.HTTPException, ValueError):
                 pass
-            return {'action': 'keep', 'region': region, 'tag': current}
+            self._note_recovery_failure()
+            return {'action': 'keep', 'region': region, 'tag': current,
+                    'reason': 'no targeted candidate passed'}
         chosen = self._find_recovery_candidate(info, data, current, baseline)
         if chosen is None:
             # The local candidate probes may leave another node selected even
@@ -812,6 +1017,7 @@ class LatencySelector:
                 except (OSError, http.client.HTTPException, ValueError):
                     pass
                 self.health_failures = 0
+                self._note_recovery_failure()
                 logging.info('Sakura health: no usable local or fallback node; keeping %s/%s',
                              region, current)
                 return {'action': 'keep', 'region': region, 'tag': current}
@@ -848,6 +1054,7 @@ class LatencySelector:
             return None
         baseline = {
             'health': 'blocked',
+            'effective_throughput_kbps': self.last_health.get('effective_throughput_kbps', 0),
             'throughput_kbps': self.last_health.get('throughput_kbps', 0),
         }
         return self._begin_pending_switch(region, info, current, chosen, baseline)
@@ -868,12 +1075,19 @@ class LatencySelector:
                 'Sakura health: %s; restored %s/%s and rejected %s for %d minutes',
                 reason, previous_region, previous, switched, HEALTH_REJECTION_SECONDS // 60)
         else:
+            samples = decision.get('samples') or []
+            measured = [measured_throughput_kbps(item) if isinstance(item, dict)
+                        else float(item) for item in samples]
             logging.info('Sakura health: kept %s/%s after two rounds (%s KB/s)',
                          switched_region, switched,
-                         statistics.median(decision['samples']))
+                         statistics.median(measured) if measured else 0)
         self.pending_switch = None
         self.health_failures = 0
         restore = decision.get('restore', False)
+        if restore:
+            self._note_recovery_failure()
+        else:
+            self._note_recovery_success()
         outcome = {
             'action': 'restore' if restore else 'accept',
             'region': previous_region if restore else switched_region,
@@ -895,7 +1109,7 @@ class LatencySelector:
             return None
         decision['samples'] = list(decision.get('samples') or [])
         samples = decision['samples']
-        samples.append(float(result.get('throughput_kbps', 0)))
+        samples.append(dict(result))
         if result.get('health') == 'disconnected':
             decision.update(restore=True)
             return self._finish_pending_switch(decision, result, 'switched node disconnected')
@@ -903,23 +1117,20 @@ class LatencySelector:
             self.pending_switch = decision
             self._save_health_state()
             return {'action': 'observe', 'tag': current, 'samples': samples}
-        measured = float(statistics.median(samples))
-        baseline = float(decision.get('baseline_kbps', 0))
-        baseline_health = decision.get('baseline_health', 'disconnected')
-        if baseline_health in ('blocked', 'disconnected'):
-            throughput_improved = measured >= self.minimum_throughput_kbps
-        else:
-            throughput_improved = measured >= max(
-                self.minimum_throughput_kbps,
-                baseline * HEALTH_IMPROVEMENT_RATIO,
-                baseline + HEALTH_IMPROVEMENT_KBPS)
-        service_ok = result.get('health') == 'healthy' and result.get('chatgpt_ok', False)
-        improved = throughput_improved and service_ok
-        decision.update(restore=not improved)
-        if not improved and not service_ok:
-            reason = 'switched node did not restore ChatGPT service'
-        else:
-            reason = 'no meaningful improvement' if not improved else 'throughput improved'
+        baseline = decision.get('baseline')
+        if not isinstance(baseline, dict):
+            baseline_health = decision.get('baseline_health', 'disconnected')
+            baseline = {
+                'ok': baseline_health != 'disconnected',
+                'complete': baseline_health != 'disconnected',
+                'chatgpt_ok': baseline_health != 'blocked',
+                'effective_throughput_kbps': decision.get('baseline_kbps', 0),
+                'throughput_kbps': decision.get('baseline_kbps', 0),
+                'health': baseline_health,
+            }
+        accepted, reason = route_policy.pending_decision(
+            baseline, samples, result, self.policy)
+        decision.update(restore=not accepted)
         return self._finish_pending_switch(decision, result, reason)
 
     def health_check_once(self):
@@ -948,17 +1159,26 @@ class LatencySelector:
         if self.pending_switch:
             outcome = self._observe_pending_switch(current, result)
         elif result['health'] == 'disconnected':
-            outcome = self._recover_current(region, info, data, current, result)
+            if self._recovery_due():
+                outcome = self._recover_current(region, info, data, current, result)
+            else:
+                outcome = {'action': 'backoff', 'tag': current,
+                           'next_recovery_at': self.next_recovery_at}
         elif result['health'] in ('low', 'blocked'):
             self.health_failures += 1
-            logging.info('Sakura health: %s %s (%s KB/s, ChatGPT=%s), %d/%d',
-                         current, result['health'], result['throughput_kbps'],
-                         result.get('chatgpt_ok', False), self.health_failures,
-                         HEALTH_FAILURE_LIMIT)
+            logging.info('Sakura health: %s %s (effective %s KB/s, body %s KB/s, ChatGPT=%s), %d/%d',
+                         current, result['health'], measured_throughput_kbps(result),
+                         result.get('throughput_kbps', 0), result.get('chatgpt_ok', False),
+                         self.health_failures, HEALTH_FAILURE_LIMIT)
             if self.health_failures >= HEALTH_FAILURE_LIMIT:
-                outcome = self._recover_current(region, info, data, current, result)
+                if self._recovery_due():
+                    outcome = self._recover_current(region, info, data, current, result)
+                else:
+                    outcome = {'action': 'backoff', 'tag': current,
+                               'next_recovery_at': self.next_recovery_at}
         else:
             self.health_failures = 0
+            self._note_recovery_success()
         self._save_health_state(last_outcome=outcome)
         return {'current': self.last_health, 'failure_count': self.health_failures,
                 'pending_switch': self.pending_switch, 'outcome': outcome}

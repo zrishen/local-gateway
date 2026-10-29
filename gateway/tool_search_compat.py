@@ -43,6 +43,7 @@ class ToolSearchCompat:
         tools = self.tools(data.get('tools', []))
         inputs = data.get('input', [])
         if not isinstance(inputs, list):
+            data['tools'] = tools
             return data
         # Discoveries from previous turns must remain callable after a reload.
         for item in inputs:

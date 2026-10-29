@@ -18,6 +18,7 @@
 | 启动 | `.\Start.ps1` 或 `Start.cmd` |
 | 停止 | `.\Stop.ps1` 或 `Stop.cmd` |
 | 状态 | `.\Status.ps1` |
+| 安全刷新网关后端 | `.\Restart-Gateway.ps1` |
 | 健康检查 | `$python -B .\Health.py` |
 | 开启自启 | `.\Install-Autostart.ps1` |
 | 取消自启 | `.\Disable-Autostart.ps1` |
@@ -34,6 +35,10 @@
 ```
 
 `Import-SakuraSubscription.ps1` 不传 `-Url` 时尝试读取本机 SakuraCat 配置。订阅地址和节点凭据只写入 `state/`。
+
+新增的 `codex-official-in` 入站和 `codex-official` 选择器属于 sing-box 配置变更，必须执行一次完整的
+`Stop.ps1` / `Start.ps1` 才会重新生成 `config.json`。`Restart-Gateway.ps1` 只重启 Python 后端，
+不会应用新入站；在完整重启前 Router 会自动回退到原有代理通道。
 
 回退到 SakuraCat 本地代理：
 
@@ -61,7 +66,7 @@
 
 订阅更新后旧节点会被清理，不会无限积累。
 
-当前节点每 5 分钟通过本地混合代理下载 64 KiB 健康样本，并访问 ChatGPT 验证同一出口。低吞吐门槛为 50 KB/s（400 Kbps）；低吞吐或 ChatGPT 不可达连续出现两次，或者连接、读取中断时，会重新测速整个美国和新加坡候选池；故障触发的切换继续观察两轮，未恢复服务或没有明显改善时回到原节点。完整测速每 60 分钟执行一次，按实际下载吞吐选择，并通过 HTTPS、TUN 和 ChatGPT 验证；新加坡节点更快时不需要等待美国整体失效。
+当前节点每 5 分钟通过本地混合代理下载 64 KiB 健康样本，并访问 ChatGPT 验证同一出口。默认有效吞吐下限 15 KB/s、正文下限 30 KB/s，并计算 0–1 分数；低分或 ChatGPT 不可达连续出现两次，或者连接、读取中断时，只比较当前节点和上次完整测速的前三名，按 60/120/300/600/1200/1800 秒退避。低分节点之间要求分数高 0.08 且有效速度高 10%；高分节点要求更大优势。切换继续观察两轮；原节点断流时，可连通且 ChatGPT 可达的新节点即使低于门槛也保留。完整测速每 60 分钟执行一次，按评分选择，并通过 HTTPS、TUN 和 ChatGPT 验证；新加坡节点更快时不需要等待美国整体失效。相关参数为 `SakuraMinimumEffectiveKBps`、`SakuraMinimumBodyKBps`、`SakuraMaxFirstByteMs`、`SakuraHealthyScore`、`SakuraSwitchScoreMargin`、`SakuraSwitchRatio`、`SakuraRecoveryBackoffSeconds` 和 `SakuraRecoveryMaxSeconds`。
 
 `SakuraSelectionRegions` 定义自动选择的地区池，当前为 `["美国", "新加坡"]`。两个地区的全部非倍消耗节点平等参与，其他地区不会自动使用。`SakuraRegion` 只作为手动切换的默认地区。订阅刷新后如果地区或节点消失，选择器会安全跳过并继续使用池内其他节点。
 
@@ -84,13 +89,18 @@
 |---|---|
 | `state/status.json` | 服务、内核和网关 PID |
 | `state/mode.json` | 当前模式、节点、上游和代理归属 |
-| `state/sakura-selection.json` | 最近一次选线结果 |
+| `state/sakura-selection.json` | 最近一次普通流量选线结果 |
+| `state/codex-official-route.json` | 官方 Codex 独立通道状态 |
 | `logs/service.log` | 常驻服务生命周期 |
+| `logs/gateway-entry.stderr.log` | 固定入口和后端切换状态 |
 | `logs/gateway.stderr.log` | Python 网关错误 |
+| `logs/gateway-backup.stderr.log` | 备用 Python 网关错误 |
 | `logs/ai-upstream.jsonl` | AI 上游连接阶段、重试次数、状态码和请求编号（不记录地址、密钥或请求正文） |
 | `logs/sing-box.log` | sing-box 运行日志 |
 
 日志不要直接公开，其中可能包含访问域名、节点地址和本机时间。
+
+`state/status.json` 会分别记录 `GatewayEntryPid`、`GatewayPid` 和 `GatewayBackupPid`。只检查主网关 PID 无法判断入口是否仍可用；客户端始终使用 `PublicPort`（默认 `8799`），`GatewayBackendPorts`（默认 `18801`、`18802`）只供本机入口转发。主后端退出时新连接会自动转到备用后端；已经建立的单条流无法跨进程迁移。后端刷新开始时先写入 `state/gateway-entry-route.json`，让公开入口把新连接切到待保留的后端，再排空并重建待更新后端；刷新结束后恢复首选端口。这个热切换不要求主端先完全空闲，因此持续使用不会把刷新卡住。文件缺失或损坏时会自动回到首选主端。
 
 ### API 上游连接与 502
 
@@ -98,7 +108,9 @@
 
 当前 AI 上游显式配置的入口属于内网（RFC1918 或 IPv6 ULA）时，生成配置会将该 IP 的 `/32` 或 `/128` 加入 TUN 排除列表，让它使用原有物理网络路由，避免 TUN 自动更新重启打断 API 连接。仅排除当前上游的精确地址，不会排除整段内网、其他映射或公网 API。此项修改需重新生成配置并重启项目服务，只重启 Python 网关不能改变 Windows 路由。
 
-AI 上游连接超时为 12 秒，连接成功后的读超时为 600 秒。连接阶段失败，或上游明确返回 502/503/504 时，最多重试一次，间隔 0.5 秒；401/403/429 不重试。请求发送后断线、等待响应超时以及已经开始的流式输出都不会自动重放，避免在结果不明确时重复生成。持续连接失败或空体 502/503/504 会返回带请求编号的 JSON 错误，可在 `logs/ai-upstream.jsonl` 对照原因与阶段。
+AI 上游连接超时为 12 秒；响应头等待默认 360 秒，流式空闲默认 360 秒，分别可用 `AiUpstreamHeadersTimeoutSeconds` 和 `AiUpstreamStreamIdleSeconds` 调整。连接阶段失败，或上游明确返回 502/503/504 时，最多重试一次，间隔 0.5 秒；401/403/429 不重试。请求发送后断线、等待响应超时以及已经开始的流式输出都不会自动重放，避免在结果不明确时重复生成。持续连接失败或空体 502/503/504 会返回带请求编号的 JSON 错误，可在 `logs/ai-upstream.jsonl` 对照原因与阶段。若上游返回 `x-process-time`，日志会记录为 `upstream_process_seconds`（毫秒自动换算为秒），用于区分公司上游排队和本地代理耗时。
+
+Codex 官方路由的 `Selected upstream route unavailable` 是本地返回的 502 兜底：它表示 TLS/代理建连、请求发送或读取官方响应头失败，不是模型内容错误。上传总预算耗尽会返回 504，并记录 `upload_timed_out: true`。建连在正文发送前失败时安全重试一次；发送或读取开始后不再重放。`logs/codex-routes.jsonl` 的 `failure_stage` 会标明 `connect`、`send`、`headers`、`client_write` 或 `response_body`；`route_lane`/`route_node` 显示是否走独立官方通道，`request_bytes`/`decoded_request_bytes`/`forwarded_request_bytes` 显示压缩前后大小。`connect_seconds: null` 指向建连阶段，`upstream_connect_attempts` 显示尝试次数，`connect_retry_error` 显示被安全重试前的建连异常，`error` 显示最终异常类型。若官方请求持续失败，先查看 `state/codex-official-route.json` 的 `ready/degraded` 和当前节点。
 
 有限重试只能缓解瞬时故障，不能修复持续的上游服务或网络故障。
 
@@ -123,3 +135,18 @@ $python = (Get-Content .\settings.local.json -Raw | ConvertFrom-Json).PythonPath
 ```
 
 测试使用本地模拟服务，不访问真实第三方 API，也不切换系统代理。
+
+## 测速与维护的连接保护
+
+完整选速使用 `gateway/isolated_probes.py` 启动短暂的无 TUN 核心，各候选使用独立回环端口。
+下载依次执行，避免本机带宽竞争。初测前三名分别取三次样本的中位数，之后才在真实路径验证最终候选。
+探测进程和含节点配置的临时目录会在退出时清理；探测失败时保留主路由。
+
+健康检查与 TUN 检查都按 HTTP 解码后的完整正文计算有效吞吐，并计入建连和首字节等待。
+TUN 检查拒绝截断正文，支持 HTTP chunked 传输解码。`effective_throughput_kbps` 用于健康门槛和节点排序；
+`throughput_kbps` 只表示握手后的正文速度，用于判断慢在建连还是传输。完整测速也遵守失败候选的 30 分钟冷却。
+
+入口目录变化只暂存新配置，不再为定时更新立即重启健康核心。
+`gateway/core_refresh.py` 只有在 15 分钟内的健康记录显示恢复失败、没有待观察切换、
+且 `/__status` 的 `active_ai_requests` 为 0 时才允许应用待更新配置。
+缺少健康记录或网关不可达时延后处理；手动重启和下次启动也会加载磁盘上的新配置。

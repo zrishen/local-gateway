@@ -2,34 +2,30 @@
 
 简体中文 | [English](README.en.md)
 
-Windows 本地统一网络入口：**TUN 分流 + 系统代理 + 节点故障切换 + 可选 AI/Codex 路由**。
+local-gateway 是一个在本机运行的 Windows 网络入口，用来统一管理日常上网、代理和可选的 AI 服务连接。
 
-- 默认入口：`127.0.0.1:8799`
-- 默认 TUN：`UnifiedBox`
+## 有什么用
 
-## 能做什么
+- 国内网站和应用直连，其他流量走代理。
+- 自动选择可用线路，节点异常时切换。
+- 统一接管浏览器和应用的代理设置。
+- 可选接入公司内网。
+- 可选导入 Trojan 订阅，或配合 SakuraCat 使用。
+- 可选为 Codex 和 AI 服务提供本地路由。
 
-- HTTP、HTTPS CONNECT、SOCKS5 和本地 AI API 共用 `8799`
-- 国内网站和应用直连，国外流量走代理
-- 可选接入公司域名和内部 DNS
-- 当前地区自动选节点；节点或入口 IP 失效时切换
-- 系统代理默认开启；SakuraCat 临时覆盖时不会被抢回
-- 可选导入 Trojan 订阅，不依赖 SakuraCat App
-- 可选 Codex 官方模型与第三方 API 模型路由
+项目只在本机运行，不提供公共代理或公共 API。
 
-项目只在本机运行，不提供公共代理或公共 API。TUN、系统代理和自启需要管理员权限。
+## 使用前准备
 
-## 环境要求
+- Windows 10/11 x64。
+- PowerShell 5.1 或 PowerShell 7。
+- Python 3.14。
+- 管理员权限。
+- 一个可用的 SakuraCat 本地代理，或兼容的 Trojan 订阅。
 
-- Windows 10/11 x64
-- PowerShell 5.1 或 PowerShell 7
-- Python 3.14
-- 管理员权限
-- 可选：SakuraCat，或一个兼容的 Trojan 订阅
+## 开始使用
 
-## 快速开始
-
-在**管理员 PowerShell**中运行：
+在管理员 PowerShell 中进入项目目录，先完成安装：
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
@@ -38,11 +34,11 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\Install-Rules.ps1
 ```
 
-初始化脚本会检测默认网卡和 Python，并生成不入库的 `settings.local.json`。
+然后选择一种上游方式。
 
-首次启动任选一种上游。
+**使用 SakuraCat：**
 
-**使用 SakuraCat 本地代理：** 启动 SakuraCat 并连接节点，关闭它的 TUN/增强模式，然后：
+启动 SakuraCat，连接节点并关闭它的 TUN/增强模式，然后运行：
 
 ```powershell
 .\Start.ps1
@@ -55,15 +51,15 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\Start.ps1
 ```
 
-检查状态：
+启动后查看状态：
 
 ```powershell
 .\Status.ps1
-$python = (Get-Content .\settings.local.json -Raw | ConvertFrom-Json).PythonPath
-& $python -B .\Health.py
 ```
 
-## 日常命令
+状态正常即可开始使用。需要停止时运行 `.\Stop.ps1`。
+
+## 日常操作
 
 | 操作 | 命令 |
 |---|---|
@@ -72,75 +68,25 @@ $python = (Get-Content .\settings.local.json -Raw | ConvertFrom-Json).PythonPath
 | 查看状态 | `.\Status.ps1` 或 `Status.cmd` |
 | 开启自启 | `.\Install-Autostart.ps1` |
 | 取消自启 | `.\Disable-Autostart.ps1` |
-| 查看地区 | `.\Switch-SakuraRegion.ps1 -List` |
-| 切换地区 | `.\Switch-SakuraRegion.ps1 -Region 日本` |
+| 查看可选地区 | `.\Switch-SakuraRegion.ps1 -List` |
+| 切换地区 | `.\Switch-SakuraRegion.ps1 -Region <地区名>` |
 
-## 配置
+如果连接异常，先运行 `.\Status.ps1` 查看当前状态，再参考[维护与诊断](docs/MAINTENANCE.md)。
 
-仓库里的 `settings.json` 是安全默认值，个人配置写入：
+## 注意事项
 
-```text
-settings.local.json
-```
+- 首次安装、启用 TUN 和配置系统代理需要管理员权限。
+- 开启 TUN 前，应关闭其他 VPN 或代理软件的 TUN 模式。
+- 项目仅供本机使用，不要把入口暴露到公网。
+- 不要公开订阅链接、API Key、配置或日志。
 
-常用字段：
-
-| 字段 | 作用 |
-|---|---|
-| `PhysicalInterface` | 物理网卡名称 |
-| `PythonPath` | Python 3.14 路径 |
-| `PublicPort` | 总入口端口，默认 `8799` |
-| `SakuraRegion` | 手动切换时的默认地区 |
-| `SakuraSelectionRegions` | 自动测速和选择的地区池，当前为美国、新加坡 |
-| `CompanyDomains` | 公司域名后缀，默认空 |
-| `CompanyDns` | 公司 DNS，默认空 |
-| `CompanyProbeHosts` | 公司健康检查主机，默认空 |
-| `AiUpstream` | 可选 AI 兼容上游，默认空 |
-
-公司域名、DNS 和健康检查都是可选项；不配置时相关规则会自动省略。
-
-以下内容不会进入版本库：
-
-- `settings.local.json`
-- `state/` 下的订阅、节点凭据、控制口令和运行状态
-- `logs/`、`work/`、`config.json`
-- `gateway/*.local.json`
-
-不要公开订阅链接、API Key、完整配置或日志。
-
-## 节点选择
-
-自动选择是一个美国和新加坡共同参与的候选池：每 60 分钟测量 `SakuraSelectionRegions` 中的全部非倍消耗节点，按实际下载吞吐排序，RTT 用于同速时的平手判断；最终选择通过 HTTPS、TUN 和 ChatGPT 检查的节点。美国没有优先权，新加坡更快时可以直接选中新加坡。
-
-每 5 分钟通过当前节点下载 64 KiB 健康样本，并检查 ChatGPT 可达性。当前低吞吐门槛为 **50 KB/s（400 Kbps）**；连续两次低于 `SakuraMinimumThroughputKBps`、连续两次无法访问 ChatGPT，或出现断流时，会重新测速整个美国和新加坡候选池；切换后继续观察两轮，没有恢复服务或明显改善就回到原节点。其他地区不会进入自动选择；名称含“倍消耗”的节点始终排除。
-
-同一节点有多个入口 IP 时，项目会先在物理网卡上测试 TCP + TLS，再只把健康入口放入配置。入口每 5 分钟检查，候选全集每 60 分钟刷新。名称带“5倍消耗”的节点默认排除。健康状态记录在 `state/sakura-health.json`。
-
-## 服务地址
-
-| 功能 | 地址 |
-|---|---|
-| HTTP/HTTPS 代理 | `http://127.0.0.1:8799` |
-| SOCKS5 代理 | `socks5://127.0.0.1:8799` |
-| AI API | `http://127.0.0.1:8799/v1/...` |
-| Codex 路由 | `http://127.0.0.1:8799/codex` |
-| 健康检查 | `GET http://127.0.0.1:8799/__health` |
-| 当前模式 | `GET http://127.0.0.1:8799/__status` |
-
-## 文档
+## 更多文档
 
 - [架构与组件](docs/ARCHITECTURE.md)
 - [维护、诊断与恢复](docs/MAINTENANCE.md)
 - [Codex 模型路由](docs/CODEX.md)
 - [验证范围](docs/VERIFICATION.md)
 - [第三方声明](THIRD_PARTY_NOTICES.md)
-
-## 安全说明
-
-- TUN 会接管系统路由，开启前应关闭其他 VPN/代理的 TUN。
-- 项目只监听回环地址，不安装证书，也不解密 HTTPS。
-- 公网暴露 `8799` 会带来未授权使用风险。
-- 本项目与 SakuraCat、OpenAI、sing-box 或任何订阅服务商没有官方关联。
 
 ## License
 

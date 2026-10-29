@@ -95,6 +95,33 @@ if ($embeddedUpstream) {
 } else {
     $outbounds += @{type='socks'; tag='sakura'; server=$Settings.SakuraHost; server_port=[int]$Settings.SakuraPort; version='5'}
 }
+$officialEnabled = $false
+$officialSelector = [string]$Settings.CodexOfficialSelector
+if ([string]::IsNullOrWhiteSpace($officialSelector)) { $officialSelector = 'codex-official' }
+if ($embeddedUpstream -and [bool]$Settings.CodexOfficialEnabled) {
+    $officialGroup = @($embeddedUpstream.outbounds | Where-Object {
+        $_.tag -eq [string]$Settings.CodexOfficialGroup -and $_.type -eq 'selector'
+    }) | Select-Object -First 1
+    if ($officialGroup -and @($officialGroup.outbounds).Count -gt 0) {
+        # An independent selector is required. Wrapping the global sakura
+        # selector would still follow the US/Singapore browser selection.
+        $outbounds += @{
+            type='selector'
+            tag=$officialSelector
+            outbounds=@($officialGroup.outbounds)
+            default=@($officialGroup.outbounds)[0]
+            interrupt_exist_connections=$false
+        }
+        $officialEnabled = $true
+    }
+}
+if ($officialEnabled) {
+    # Insert after sniff and before the process/Direct rules so official Codex
+    # keeps its own lane whenever the core is available.
+    $routeRules = @(@($routeRules | Select-Object -First 3)) +
+        @(@{inbound=@('codex-official-in'); action='route'; outbound=$officialSelector}) +
+        @(@($routeRules | Select-Object -Skip 3))
+}
 $config = [ordered]@{
     log = @{ level = 'warn'; timestamp = $true; output = (Join-Path $LogDir 'sing-box.log') }
     dns = @{
@@ -121,6 +148,12 @@ $config = [ordered]@{
     }
     experimental = @{
         clash_api = @{external_controller="127.0.0.1:$($Settings.ControllerPort)"; secret=$secret; default_mode=$(if ($embeddedUpstream -or (Test-TcpPort $Settings.SakuraHost $Settings.SakuraPort)) {'Rule'} else {'Direct'})}
+    }
+}
+if ($officialEnabled) {
+    $config.inbounds = @($config.inbounds) + @{
+        type='mixed'; tag='codex-official-in'; listen='127.0.0.1'
+        listen_port=[int]$Settings.CodexOfficialPort
     }
 }
 if (-not $ProxyOnly) {

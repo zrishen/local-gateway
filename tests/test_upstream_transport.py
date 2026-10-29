@@ -48,11 +48,23 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(attempts, 2)
         failed.request.assert_not_called()
         failed.close.assert_called_once()
-        success.sock.settimeout.assert_called_with(600)
+        success.sock.settimeout.assert_called_with(360.0)
         events = self.event_path.read_text()
         for private in ('private hostname', 'secret-key', 'private-prompt', '/v1/responses'):
             self.assertNotIn(private, events)
         self.assertEqual(json.loads(events.splitlines()[0])['phase'], 'connect')
+
+    def test_split_header_and_stream_budgets_and_upstream_process_time(self):
+        conn = self.connection()
+        conn.getresponse.return_value.getheader.side_effect = (
+            lambda name: '267000' if name == 'x-process-time' else None)
+        transport.request_upstream(
+            Mock(return_value=conn), 'POST', '/v1/responses', b'{}', {},
+            headers_timeout=45, stream_timeout=90)
+        self.assertEqual([call.args[0] for call in conn.sock.settimeout.call_args_list],
+                         [45.0, 90.0])
+        event = json.loads(self.event_path.read_text().splitlines()[-1])
+        self.assertEqual(event['upstream_process_seconds'], 267.0)
 
     def test_persistent_connect_failure_is_bounded_and_structured(self):
         conns = [self.connection(), self.connection()]

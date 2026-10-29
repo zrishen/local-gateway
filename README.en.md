@@ -2,34 +2,30 @@
 
 [简体中文](README.md) | English
 
-A unified local network gateway for Windows: **TUN split tunneling + system proxy + node failover + optional AI/Codex routing**.
+local-gateway is a local network gateway for Windows. It simplifies everyday networking, proxying, and optional AI service connections from one place.
 
-- Default endpoint: `127.0.0.1:8799`
-- Default TUN interface: `UnifiedBox`
+## What it is for
 
-## Features
+- Connect to domestic sites and applications directly while routing other traffic through a proxy.
+- Select a working route automatically and switch when a node becomes unhealthy.
+- Manage the proxy settings used by browsers and applications.
+- Optionally connect to company networks.
+- Optionally import a Trojan subscription or work with SakuraCat.
+- Optionally provide local routing for Codex and AI services.
 
-- HTTP, HTTPS CONNECT, SOCKS5, and the local AI API share port `8799`
-- By default, websites and applications in mainland China connect directly; traffic to other destinations uses the proxy
-- Optional routing for company domains and internal DNS
-- Automatic selection across US and Singapore nodes, with health checks and entry-IP failover
-- System proxy enabled by default, while allowing SakuraCat to temporarily override it
-- Optional Trojan subscription import, without requiring the SakuraCat app
-- Optional routing between official Codex models and third-party API models
+The project runs only on your local machine. It does not provide a public proxy or public API.
 
-The project runs only on your local machine and does not provide a public proxy or public API. TUN, system proxy configuration, and automatic startup require administrator privileges.
+## Before you start
 
-## Requirements
+- Windows 10/11 x64.
+- PowerShell 5.1 or PowerShell 7.
+- Python 3.14.
+- Administrator privileges.
+- A working SakuraCat local proxy or a compatible Trojan subscription.
 
-- Windows 10/11 x64
-- PowerShell 5.1 or PowerShell 7
-- Python 3.14
-- Administrator privileges
-- Optional: SakuraCat or a compatible Trojan subscription
+## Getting started
 
-## Quick start
-
-Run in **PowerShell as Administrator**:
+Open PowerShell as Administrator, enter the project directory, and complete the installation:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
@@ -38,11 +34,11 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\Install-Rules.ps1
 ```
 
-The initialization script detects the default network adapter and Python, then generates `settings.local.json`, which is excluded from version control.
+Then choose one upstream option.
 
-For the first launch, choose one of the following upstream options.
+**Use SakuraCat:**
 
-**Use SakuraCat's local proxy:** Start SakuraCat, connect to a node, and disable its TUN/enhanced mode. Then run:
+Start SakuraCat, connect to a node, and disable its TUN/enhanced mode. Then run:
 
 ```powershell
 .\Start.ps1
@@ -55,15 +51,15 @@ For the first launch, choose one of the following upstream options.
 .\Start.ps1
 ```
 
-Check the status:
+Check the status after startup:
 
 ```powershell
 .\Status.ps1
-$python = (Get-Content .\settings.local.json -Raw | ConvertFrom-Json).PythonPath
-& $python -B .\Health.py
 ```
 
-## Everyday commands
+Once the status is healthy, you can start using it. Run `.\Stop.ps1` when you want to stop it.
+
+## Everyday use
 
 | Action | Command |
 |---|---|
@@ -72,84 +68,25 @@ $python = (Get-Content .\settings.local.json -Raw | ConvertFrom-Json).PythonPath
 | Show status | `.\Status.ps1` or `Status.cmd` |
 | Enable automatic startup | `.\Install-Autostart.ps1` |
 | Disable automatic startup | `.\Disable-Autostart.ps1` |
-| List regions | `.\Switch-SakuraRegion.ps1 -List` |
-| Switch region | `.\Switch-SakuraRegion.ps1 -Region 日本` |
+| List available regions | `.\Switch-SakuraRegion.ps1 -List` |
+| Switch region | `.\Switch-SakuraRegion.ps1 -Region <region>` |
 
-Region names must match the names returned by `-List`; `日本` is the name used for Japan in this example.
+If the connection is unhealthy, run `.\Status.ps1` first, then see [Maintenance and diagnostics](docs/MAINTENANCE.md).
 
-## Configuration
+## Notes
 
-The repository's `settings.json` provides safe defaults. Put your personal configuration in:
+- The first installation, TUN setup, and system proxy configuration require administrator privileges.
+- Disable TUN mode in other VPN or proxy applications before enabling TUN here.
+- This project is for local use only. Do not expose it to the public internet.
+- Do not publish subscription URLs, API keys, configurations, or logs.
 
-```text
-settings.local.json
-```
-
-Common fields:
-
-| Field | Purpose |
-|---|---|
-| `PhysicalInterface` | Physical network adapter name |
-| `PythonPath` | Path to Python 3.14 |
-| `PublicPort` | Shared gateway port; defaults to `8799` |
-| `SakuraRegion` | Default region for manual switching |
-| `SakuraSelectionRegions` | Automatic node pool; currently US and Singapore |
-| `CompanyDomains` | Company domain suffixes; empty by default |
-| `CompanyDns` | Company DNS; empty by default |
-| `CompanyProbeHosts` | Company health-check hosts; empty by default |
-| `AiUpstream` | Optional AI-compatible upstream; empty by default |
-
-Company domains, DNS, and health checks are optional. Their rules are omitted automatically when they are not configured.
-
-The following are excluded from version control:
-
-- `settings.local.json`
-- Subscriptions, node credentials, control secrets, and runtime state under `state/`
-- `logs/`, `work/`, and `config.json`
-- `gateway/*.local.json`
-
-Do not publish subscription URLs, API keys, full configurations, or logs.
-
-## Node selection
-
-The selector compares every non-multiplier node in the configured US and Singapore pool. The default settings are equivalent to:
-
-```json
-"SakuraSelectionRegions": ["美国", "新加坡"],
-"SakuraMinimumThroughputKBps": 50
-```
-
-Every 60 minutes, the gateway measures all pool nodes and chooses the highest-throughput candidate that also passes HTTPS, TUN, and ChatGPT checks. RTT is used as a tie breaker. Neither country has automatic priority.
-
-Every 5 minutes, it downloads a 64 KiB sample through the current node and verifies ChatGPT. Two consecutive samples below 50 KB/s, two consecutive ChatGPT failures, or a broken stream triggers a new full US/Singapore comparison. Health-triggered switches are observed for two rounds and restored if they do not improve service. Other regions and nodes marked `倍消耗` (multiplier usage) are excluded.
-
-When a node has multiple entry IPs, the project first probes TCP + TLS through the physical network adapter and includes only healthy entries in the configuration. Entries are checked every 5 minutes, and the full candidate set is refreshed every 60 minutes. Health state is recorded in `state/sakura-health.json`.
-
-## Service endpoints
-
-| Function | Address |
-|---|---|
-| HTTP/HTTPS proxy | `http://127.0.0.1:8799` |
-| SOCKS5 proxy | `socks5://127.0.0.1:8799` |
-| AI API | `http://127.0.0.1:8799/v1/...` |
-| Codex routing | `http://127.0.0.1:8799/codex` |
-| Health check | `GET http://127.0.0.1:8799/__health` |
-| Current mode | `GET http://127.0.0.1:8799/__status` |
-
-## Documentation
+## More documentation
 
 - [Architecture and components (Chinese)](docs/ARCHITECTURE.md)
 - [Maintenance, diagnostics, and recovery (Chinese)](docs/MAINTENANCE.md)
 - [Codex model routing (Chinese)](docs/CODEX.md)
 - [Verification scope (Chinese)](docs/VERIFICATION.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
-
-## Security notes
-
-- TUN takes over system routing. Disable the TUN mode of other VPNs or proxies before enabling it.
-- The project listens only on loopback addresses, installs no certificates, and does not decrypt HTTPS traffic.
-- Exposing port `8799` to the public internet risks unauthorized use.
-- This project is not officially affiliated with SakuraCat, OpenAI, sing-box, or any subscription provider.
 
 ## License
 

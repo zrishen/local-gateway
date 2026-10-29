@@ -71,7 +71,8 @@ class SelectionQualityTests(unittest.TestCase):
 
         selector.request = request
         selector.measure = lambda tag: delays[tag]
-        selector.verify_through_proxy = lambda: quality[selected[-1]]
+        selector._measure_candidates = lambda candidates: [
+            {**item, **quality[item['tag']]} for item in candidates if quality[item['tag']].get('ok')]
         return selector, selected
 
     def test_quality_floor_skips_a_faster_but_slow_download(self):
@@ -82,17 +83,17 @@ class SelectionQualityTests(unittest.TestCase):
         result = selector.select_once()
         self.assertEqual(result['tag'], 'b')
         self.assertTrue(result['quality_verified'])
-        self.assertEqual(selected, ['a', 'b'])
+        self.assertEqual(selected, ['b'])
 
     def test_highest_throughput_valid_node_is_kept_when_all_are_slow(self):
         selector, selected = self.selector_with(
             {'a': 200, 'b': 350},
             {'a': {'ok': True, 'throughput_kbps': 20, 'chatgpt_ok': True},
-             'b': {'ok': True, 'throughput_kbps': 30, 'chatgpt_ok': True}})
+             'b': {'ok': True, 'throughput_kbps': 55, 'chatgpt_ok': True}})
         result = selector.select_once()
         self.assertEqual(result['tag'], 'b')
         self.assertFalse(result['quality_verified'])
-        self.assertEqual(selected, ['a', 'b'])
+        self.assertEqual(selected, ['b'])
 
     def test_chatgpt_reachable_node_beats_a_faster_blocked_download(self):
         selector, selected = self.selector_with(
@@ -167,7 +168,8 @@ class SelectionPoolTests(unittest.TestCase):
 
         selector.request = request
         selector.measure = lambda tag: delays[tag]
-        selector.verify_through_proxy = lambda: quality[selected[-1]]
+        selector._measure_candidates = lambda candidates: [
+            {**item, **quality[item['tag']]} for item in candidates if quality[item['tag']].get('ok')]
         return selector, selected
 
     def test_fastest_verified_node_wins_across_us_and_singapore(self):
@@ -180,7 +182,7 @@ class SelectionPoolTests(unittest.TestCase):
         self.assertEqual(result['tag'], 'sg-a')
         self.assertEqual(result['region'], '新加坡')
         self.assertEqual(result['regions'], ['美国', '新加坡'])
-        self.assertEqual(selected, ['us-a', 'sg-a', 'us-b', 'sg-a'])
+        self.assertEqual(selected, ['sg-a'])
 
     def test_selection_pool_skips_multiplier_and_unlisted_regions(self):
         selector, selected = self.selector_with(
@@ -192,14 +194,27 @@ class SelectionPoolTests(unittest.TestCase):
         self.assertNotIn('sg-multiplier', selected)
         self.assertNotIn('jp-a', selected)
 
+    def test_selection_pool_respects_rejected_candidate_cooldown(self):
+        selector, selected = self.selector_with(
+            {'us-a': 200, 'us-b': 250, 'sg-a': 300},
+            {'us-a': {'ok': True, 'throughput_kbps': 100, 'chatgpt_ok': True},
+             'us-b': {'ok': True, 'throughput_kbps': 120, 'chatgpt_ok': True},
+             'sg-a': {'ok': True, 'throughput_kbps': 900, 'chatgpt_ok': True}})
+        selector.rejected_candidates['sg-a'] = ls.time.time() + 1800
+        result = selector.select_once()
+        self.assertEqual(result['tag'], 'us-b')
+        self.assertEqual(selected, ['us-b'])
+
     def test_recovery_scans_same_us_singapore_pool(self):
         selector, _ = self.selector_with(
             {'us-a': 100, 'us-b': 200, 'sg-a': 150},
             {'us-a': {'ok': True, 'throughput_kbps': 100, 'chatgpt_ok': True},
              'us-b': {'ok': True, 'throughput_kbps': 80, 'chatgpt_ok': True},
              'sg-a': {'ok': True, 'throughput_kbps': 90, 'chatgpt_ok': True}})
+        selector.selection_regions = ['美国', '新加坡']
         selector.select_once = Mock(return_value={
-            'region': '新加坡', 'group': 'region-sg', 'tag': 'sg-a'})
+            'region': '新加坡', 'group': 'region-sg', 'tag': 'sg-a',
+            'ok': True, 'chatgpt_ok': True})
         data = selector.state()
         outcome = selector._recover_current(
             '美国', data['region_groups']['美国'], data, 'us-a',
@@ -208,7 +223,12 @@ class SelectionPoolTests(unittest.TestCase):
         self.assertEqual(outcome['tag'], 'sg-a')
         self.assertEqual(selector.pending_switch['previous_group'], 'region-us')
         self.assertEqual(selector.pending_switch['switched_group'], 'region-sg')
-        selector.select_once.assert_called_once_with()
+        selector.select_once.assert_called_once()
+        args, kwargs = selector.select_once.call_args
+        self.assertEqual(args, ())
+        self.assertFalse(kwargs['apply'])
+        self.assertEqual([item['tag'] for item in kwargs['candidates']],
+                         ['us-a', 'us-b'])
 
 
 class CrossRegionFallbackTests(unittest.TestCase):
@@ -328,10 +348,6 @@ class CrossRegionFallbackTests(unittest.TestCase):
         self.assertTrue(selector.pending_switch['cross_region'])
 
 
-
-if __name__ == '__main__':
-    unittest.main()
-
 class HealthAwareSelectionTests(unittest.TestCase):
     def selector_with(self, current='a'):
         temporary = tempfile.TemporaryDirectory()
@@ -371,6 +387,22 @@ class HealthAwareSelectionTests(unittest.TestCase):
             {'ok': True, 'complete': True, 'throughput_kbps': 12}, minimum), 'low')
         self.assertEqual(ls.classify_health(
             {'ok': False, 'complete': False, 'throughput_kbps': 0}, minimum), 'disconnected')
+        self.assertEqual(ls.classify_health(
+            {'ok': True, 'complete': True, 'throughput_kbps': 125,
+             'effective_throughput_kbps': 27}, 50), 'low')
+
+    def test_effective_speed_is_used_for_selection(self):
+        selector, selected = self.selector_with()
+        selector.measure = lambda tag: 100
+        selector._measure_candidates = lambda candidates: [
+            {**candidate, 'ok': True, 'chatgpt_ok': True,
+             'throughput_kbps': speed, 'effective_throughput_kbps': effective}
+            for candidate, speed, effective in (
+                (candidates[0], 400, 35),
+                (candidates[1], 150, 90))]
+        result = selector.select_once()
+        self.assertEqual(result['tag'], 'b')
+        self.assertEqual(result['effective_throughput_kbps'], 90)
 
     def test_two_low_samples_are_required_before_switch(self):
         selector, _ = self.selector_with()
@@ -435,6 +467,41 @@ class HealthAwareSelectionTests(unittest.TestCase):
             {'health': 'healthy', 'throughput_kbps': 42}, baseline))
         self.assertFalse(ls.LatencySelector._meaningfully_better(
             {'health': 'healthy', 'throughput_kbps': 27}, baseline))
+
+    def test_pending_switch_keeps_low_connected_route_after_an_outage(self):
+        selector, _ = self.selector_with(current='b')
+        selector.pending_switch = {
+            'previous_tag': 'a', 'switched_tag': 'b', 'baseline_kbps': 0,
+            'baseline_health': 'disconnected', 'samples': []}
+        values = iter([
+            {'ok': True, 'complete': True, 'effective_throughput_kbps': 34,
+             'throughput_kbps': 90, 'health': 'low'},
+            {'ok': True, 'complete': True, 'effective_throughput_kbps': 38,
+             'throughput_kbps': 95, 'health': 'low'},
+        ])
+        selector._small_quality = Mock(side_effect=lambda: next(values))
+        selector.health_check_once()
+        second = selector.health_check_once()
+        self.assertEqual(second['outcome']['action'], 'accept')
+        self.assertEqual(second['outcome']['reason'], 'service restored')
+        selector._set_group.assert_not_called()
+
+    def test_working_low_route_is_not_replaced_by_another_low_route(self):
+        selector, _ = self.selector_with(current='a')
+        selector.selection_regions = ['Region']
+        data = selector.state()
+        selector.select_once = Mock(return_value={
+            'region': 'Region', 'group': 'region-group', 'tag': 'b',
+            'ok': True, 'complete': True, 'chatgpt_ok': True,
+            'effective_throughput_kbps': 42, 'throughput_kbps': 90,
+            'health': 'low'})
+        baseline = {'health': 'low', 'effective_throughput_kbps': 40,
+                    'throughput_kbps': 85}
+        outcome = selector._recover_current(
+            'Region', data['region_groups']['Region'], data, 'a', baseline)
+        self.assertEqual(outcome['action'], 'keep')
+        self.assertIn('meaningfully improve', outcome['reason'])
+        selector._set_group.assert_called_with('region-group', 'a')
 
     def test_pending_switch_restores_previous_after_two_weak_samples(self):
         selector, _ = self.selector_with(current='b')

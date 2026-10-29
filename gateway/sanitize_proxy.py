@@ -47,6 +47,18 @@ from upstream_transport import (CONNECT_TIMEOUT, MAX_ATTEMPTS, UpstreamUnavailab
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_SETTINGS = load_settings(PROJECT_ROOT)
+
+
+def _seconds(key, default):
+    try:
+        return max(1.0, float(PROJECT_SETTINGS.get(key, default)))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+HEADERS_TIMEOUT = _seconds('AiUpstreamHeadersTimeoutSeconds', 360)
+STREAM_TIMEOUT = _seconds('AiUpstreamStreamIdleSeconds', 360)
+UPLOAD_TIMEOUT = _seconds('AiUpstreamUploadSeconds', 180)
 UPSTREAM = (os.environ.get("SANITIZE_UPSTREAM") or PROJECT_SETTINGS.get("AiUpstream") or "").rstrip("/")
 PORT = int(os.environ.get("SANITIZE_PORT") or (sys.argv[1] if __name__ == "__main__" and len(sys.argv) > 1 else PROJECT_SETTINGS.get("PublicPort", 8799)))
 DUMP = os.environ.get("SANITIZE_DUMP") == "1"
@@ -58,7 +70,7 @@ UPSTREAM_DNS_OVERRIDES = load_dns_overrides(PROJECT_ROOT)
 
 def create_upstream_connection(up):
     connection_class = http.client.HTTPSConnection if up.scheme == "https" else http.client.HTTPConnection
-    conn = connection_class(up.netloc, timeout=600)
+    conn = connection_class(up.netloc, timeout=UPLOAD_TIMEOUT)
     override = UPSTREAM_DNS_OVERRIDES.get(up.hostname)
     if not override:
         return conn
@@ -294,7 +306,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             conn, resp, request_id, attempts = request_upstream(
                 lambda: create_upstream_connection(up), method, target, body,
-                self._upstream_headers())
+                self._upstream_headers(), headers_timeout=HEADERS_TIMEOUT,
+                stream_timeout=STREAM_TIMEOUT)
         except UpstreamUnavailable as error:
             self._upstream_error(502, error.payload())
             return
@@ -350,6 +363,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "upstream_dns_override_count": len(UPSTREAM_DNS_OVERRIDES),
                 "upstream_dns_override_mode": "explicit",
                 "upstream_connect_timeout_seconds": CONNECT_TIMEOUT,
+                "upstream_headers_timeout_seconds": HEADERS_TIMEOUT,
+                "upstream_stream_idle_seconds": STREAM_TIMEOUT,
+                "upstream_upload_timeout_seconds": UPLOAD_TIMEOUT,
                 "upstream_max_attempts": MAX_ATTEMPTS,
                 "requests": STATS["requests"], "cleaned_nodes": STATS["cleaned_nodes"],
                 "mapped_requests": STATS["mapped"], "model_map": MODEL_MAP,
@@ -387,7 +403,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             target = up.path.rstrip("/") + "/v1/chat/completions"
             conn, resp, request_id, attempts = request_upstream(
                 lambda: create_upstream_connection(up), 'POST', target,
-                json.dumps(chat, ensure_ascii=False).encode('utf-8'), headers)
+                json.dumps(chat, ensure_ascii=False).encode('utf-8'), headers,
+                headers_timeout=HEADERS_TIMEOUT, stream_timeout=STREAM_TIMEOUT)
         except UpstreamUnavailable as error:
             self._upstream_error(502, error.payload())
             return
