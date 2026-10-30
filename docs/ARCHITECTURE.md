@@ -106,12 +106,13 @@ sakura-region-us
 ## Claude Code 官方模型桥接
 
 Claude Code 使用 Anthropic `/v1/messages`。当请求模型在 `CodexAnthropicOfficialModels`
-（默认仅 `openai/gpt-6.1-sol`）中时，`sanitize_proxy` 把请求交给
+（默认 `codex/gpt-6.1-sol`、`codex/gpt-6-astra`）中时，`sanitize_proxy` 把请求交给
 `gateway/anthropic_codex_bridge.py`：system 转为 `instructions`，消息、工具调用和工具结果
 转为 Codex Responses 的 `input` 项，工具 schema 经 `clean_schema` 清洗，流式 Responses SSE
 再转回 Anthropic SSE。桥接复用 `codex_router.official_connection()` 和
 `~/.codex/auth.json` 的 ChatGPT 登录，只读凭证且不写入日志或 `state/`；其他模型仍走原有
-第三方清洗和转发路径。`CodexAnthropicBridgeEnabled=false` 时官方模型返回 503。
+第三方清洗和转发路径。`codex/` 是官方专用前缀；`openai/` 不在默认官方列表中，
+继续走内部/第三方 API。`CodexAnthropicBridgeEnabled=false` 时官方模型返回 503。
 
 官方请求保留原始 zstd/gzip，只有改写 JSON 后才重新压缩；连接、上传、响应头和流式空闲
 分别有预算，上传预算耗尽返回 `504`，不再共用 600 秒读超时。

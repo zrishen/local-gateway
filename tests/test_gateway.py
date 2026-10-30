@@ -142,10 +142,15 @@ class GatewayTests(unittest.TestCase):
 
         with patch.object(bridge, 'handle_messages', side_effect=fake_bridge):
             status, body = self.request_status('POST', '/v1/messages', {
-                'model': 'openai/gpt-6.1-sol',
+                'model': 'codex/gpt-6.1-sol',
+                'messages': [{'role': 'user', 'content': 'hi'}]})
+            astra_status, astra_body = self.request_status('POST', '/v1/messages', {
+                'model': 'codex/gpt-6-astra',
                 'messages': [{'role': 'user', 'content': 'hi'}]})
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body), {'bridged': 'openai/gpt-6.1-sol'})
+        self.assertEqual(json.loads(body), {'bridged': 'codex/gpt-6.1-sol'})
+        self.assertEqual(astra_status, 200)
+        self.assertEqual(json.loads(astra_body), {'bridged': 'codex/gpt-6-astra'})
         self.assertEqual(calls['data']['messages'][0]['content'], 'hi')
 
     def test_third_party_anthropic_model_keeps_upstream_path(self):
@@ -156,7 +161,7 @@ class GatewayTests(unittest.TestCase):
 
     def test_official_count_tokens_is_answered_locally(self):
         status, body = self.request_status('POST', '/v1/messages/count_tokens', {
-            'model': 'openai/gpt-6.1-sol',
+            'model': 'codex/gpt-6.1-sol',
             'messages': [{'role': 'user', 'content': 'hello world'}]})
         self.assertEqual(status, 200)
         self.assertGreater(json.loads(body)['input_tokens'], 0)
@@ -166,7 +171,7 @@ class GatewayTests(unittest.TestCase):
                         CodexAnthropicBridgeEnabled=False)
         with patch.object(sanitize_proxy, 'PROJECT_SETTINGS', settings):
             status, body = self.request_status('POST', '/v1/messages', {
-                'model': 'openai/gpt-6.1-sol',
+                'model': 'codex/gpt-6.1-sol',
                 'messages': [{'role': 'user', 'content': 'hi'}]})
         self.assertEqual(status, 503)
         self.assertEqual(json.loads(body)['error']['type'], 'api_error')

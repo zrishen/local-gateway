@@ -125,8 +125,9 @@ Codex 官方路由的 `Selected upstream route unavailable` 是本地返回的 5
 ### Claude Code 官方模型
 
 Claude Code 仍使用 `127.0.0.1:8799/v1/messages`。模型名在 `CodexAnthropicOfficialModels`
-（默认 `["openai/gpt-6.1-sol"]`）中时，网关把 Anthropic 请求转换为官方 Codex Responses
-并转换回 Anthropic SSE；其他模型不受影响。凭证只读取 `CODEX_HOME/auth.json`
+（默认 `["codex/gpt-6.1-sol", "codex/gpt-6-astra"]`）中时，网关把 Anthropic 请求转换为官方
+Codex Responses 并转换回 Anthropic SSE；其他模型不受影响。`codex/` 前缀用于官方模型，
+`openai/` 前缀不在默认官方列表中，继续走内部/第三方 API。凭证只读取 `CODEX_HOME/auth.json`
 （默认 `~/.codex/auth.json`），要求 ChatGPT 登录，网关和日志都不复制或记录 token。
 
 `CodexAnthropicBridgeEnabled=false` 时官方模型返回 503；

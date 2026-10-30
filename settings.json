@@ -57,7 +57,8 @@
   "CodexOfficialStreamIdleSeconds": 180,
   "CodexAnthropicBridgeEnabled": true,
   "CodexAnthropicOfficialModels": [
-    "openai/gpt-6.1-sol"
+    "codex/gpt-6.1-sol",
+    "codex/gpt-6-astra"
   ],
   "CodexAnthropicBridgeMaxBodyBytes": 33554432,
   "CodexAnthropicBridgeClientVersion": "",

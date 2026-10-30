@@ -11,10 +11,11 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'gateway'))
 import anthropic_codex_bridge as bridge
 
-OFFICIAL = 'openai/gpt-6.1-sol'
+OFFICIAL = 'codex/gpt-6.1-sol'
+ASTRA = 'codex/gpt-6-astra'
 SETTINGS = {
     'CodexAnthropicBridgeEnabled': True,
-    'CodexAnthropicOfficialModels': [OFFICIAL],
+    'CodexAnthropicOfficialModels': [OFFICIAL, ASTRA],
     'CodexAnthropicBridgeMaxBodyBytes': 1024 * 1024,
     'CodexAnthropicBridgeClientVersion': '9.9.9',
     'CodexOfficialHeadersTimeoutSeconds': 30,
@@ -151,6 +152,18 @@ class BuildRequestTests(unittest.TestCase):
         self.assertTrue(request['stream'])
         self.assertEqual(request['instructions'], 'system prompt')
 
+    def test_astra_uses_the_codex_prefix_and_official_slug(self):
+        request = bridge.build_responses_request(
+            message_request(model=ASTRA + '[1M]'))
+        self.assertEqual(request['model'], 'gpt-6-astra')
+
+    def test_legacy_openai_prefix_is_not_official_by_default(self):
+        body = json.dumps({'model': 'openai/gpt-6.1-sol',
+                           'messages': [{'role': 'user', 'content': 'hi'}]}).encode()
+        data, official = bridge.inspect_request(body, {}, SETTINGS)
+        self.assertFalse(official)
+        self.assertIsNone(data)
+
     def test_messages_tools_and_tool_choice_are_converted(self):
         request = bridge.build_responses_request({
             'model': OFFICIAL,
@@ -280,6 +293,10 @@ class InspectionTests(unittest.TestCase):
         data, official = bridge.inspect_request(body, {}, SETTINGS)
         self.assertTrue(official)
         self.assertEqual(data['model'], OFFICIAL)
+        body = json.dumps({'model': ASTRA, 'messages': []}).encode()
+        data, official = bridge.inspect_request(body, {}, SETTINGS)
+        self.assertTrue(official)
+        self.assertEqual(data['model'], ASTRA)
         body = json.dumps({'model': 'openai/gpt-6-luna', 'messages': []}).encode()
         self.assertEqual(bridge.inspect_request(body, {}, SETTINGS), (None, False))
 

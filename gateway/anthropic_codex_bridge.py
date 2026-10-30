@@ -24,7 +24,11 @@ try:
 except ImportError:  # pragma: no cover - only older Python versions
     zstd = None
 
-DEFAULT_OFFICIAL_MODELS = ('openai/gpt-6.1-sol',)
+# ``codex/`` marks models that go through the official Codex lane. The
+# ``openai/`` namespace is intentionally not included: those names keep the
+# existing internal/third-party API path unless explicitly configured.
+DEFAULT_OFFICIAL_MODELS = ('codex/gpt-6.1-sol', 'codex/gpt-6-astra')
+CLIENT_PREFIXES = ('codex/', 'openai/')
 DEFAULT_MAX_BODY_BYTES = 32 * 1024 * 1024
 OFFICIAL_RESPONSES_PATH = '/backend-api/codex/responses'
 SUFFIX_RE = re.compile(r'\[1m\]$', re.IGNORECASE)
@@ -79,7 +83,10 @@ def is_official_model(model, settings):
 
 def upstream_model(model):
     name = strip_1m(model)
-    return name[len('openai/'):] if name.startswith('openai/') else name
+    for prefix in CLIENT_PREFIXES:
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
 
 
 def max_body_bytes(settings):
