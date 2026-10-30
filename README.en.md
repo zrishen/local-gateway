@@ -13,6 +13,7 @@ local-gateway is a local network gateway for Windows. It simplifies everyday net
 - Optionally import a Trojan subscription or work with SakuraCat.
 - Optionally provide local routing for Codex and AI services.
 - Optionally let Claude Code use official Codex models.
+- Optionally generate or edit images with Codex CLI's built-in image generation.
 
 The project runs only on your local machine. It does not provide a public proxy or public API.
 
@@ -86,6 +87,7 @@ If the connection is unhealthy, run `.\Status.ps1` first, then see [Maintenance 
 - [Architecture and components (Chinese)](docs/ARCHITECTURE.md)
 - [Maintenance, diagnostics, and recovery (Chinese)](docs/MAINTENANCE.md)
 - [Codex model routing (Chinese)](docs/CODEX.md)
+- [Codex image generation](tools/codex-imagegen/README.md)
 - [Verification scope (Chinese)](docs/VERIFICATION.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 

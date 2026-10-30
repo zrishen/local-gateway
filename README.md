@@ -13,6 +13,7 @@ local-gateway 是一个在本机运行的 Windows 网络入口，用来统一管
 - 可选导入 Trojan 订阅，或配合 SakuraCat 使用。
 - 可选为 Codex 和 AI 服务提供本地路由。
 - 可选让 Claude Code 使用 Codex 官方模型。
+- 可选通过 Codex CLI 内置生图能力生成或编辑图片。
 
 项目只在本机运行，不提供公共代理或公共 API。
 
@@ -86,6 +87,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 - [架构与组件](docs/ARCHITECTURE.md)
 - [维护、诊断与恢复](docs/MAINTENANCE.md)
 - [Codex 模型路由](docs/CODEX.md)
+- [Codex 生图工具](tools/codex-imagegen/README.md)
 - [验证范围](docs/VERIFICATION.md)
 - [第三方声明](THIRD_PARTY_NOTICES.md)
 

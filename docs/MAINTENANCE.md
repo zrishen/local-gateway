@@ -135,6 +135,17 @@ Codex Responses 并转换回 Anthropic SSE；其他模型不受影响。`codex/`
 `CodexAnthropicBridgeClientVersion` 可覆盖发出的 Codex CLI 版本号（留空自动探测）。
 把模型从列表移除即可回到原有第三方转发路径，无需改代码。
 
+### Codex 生图
+
+`tools/codex-imagegen/generate.py` 通过 Codex CLI 内置 `image_gen` 生成或编辑图片，
+使用 `~/.codex/auth.json` 的 ChatGPT 登录，不需要 `OPENAI_API_KEY`。它运行嵌套的
+`codex exec --ephemeral --sandbox workspace-write`，通常需要 1 分钟以上，并消耗
+Codex/ChatGPT 生图额度。用法和参数见 [tools/codex-imagegen/README.md](../tools/codex-imagegen/README.md)。
+
+Claude Code 在项目内可直接使用 `codex-imagegen` skill。该能力不经过
+`/v1/messages` 桥接，因为 `image_gen` 由 Codex 客户端执行，而不是 Responses 后端。
+要求 Codex CLI 0.140+，且 `codex features list` 中 `image_generation` 为 `stable true`。
+
 ## 恢复
 
 ```powershell
