@@ -1052,10 +1052,29 @@ class StreamTranslator:
         }
 
 
-def _open_connection(settings):
+def _handle_connect_failure(connection, settings, official_manager):
+    """Rotate the dedicated selector before falling back to a shared lane."""
+    lane = getattr(connection, 'route_lane', None)
+    node = getattr(connection, 'route_node', None)
+    selector = str((settings or {}).get('CodexOfficialSelector') or 'codex-official')
+    if lane == selector and official_manager is not None:
+        try:
+            if official_manager.failover_after_connect_failure(node):
+                return
+        except (OSError, ValueError, http.client.HTTPException):
+            pass
+    try:
+        codex_router.mark_official_lane_failed(connection)
+    except Exception:
+        pass
+
+
+def _open_connection(settings, official_manager=None, stats=None):
     headers_timeout = _float_setting(settings, 'CodexOfficialHeadersTimeoutSeconds', 360)
     last_error = None
-    for attempt in range(3):
+    for attempt in range(4):
+        if stats is not None:
+            stats['connect_attempts'] = attempt + 1
         connection = codex_router.official_connection()
         connection.headers_timeout = headers_timeout
         try:
@@ -1063,15 +1082,12 @@ def _open_connection(settings):
             return connection
         except (OSError, http.client.HTTPException) as error:
             last_error = error
-            try:
-                codex_router.mark_official_lane_failed(connection)
-            except Exception:
-                pass
+            _handle_connect_failure(connection, settings, official_manager)
             try:
                 connection.close()
             except OSError:
                 pass
-            if attempt < 2:
+            if attempt < 3:
                 time.sleep(.15)
     raise last_error or OSError('Official Codex connection unavailable')
 
@@ -1095,7 +1111,7 @@ def _set_socket_timeout(connection, response, seconds):
             pass
 
 
-def handle_messages(handler, data, settings):
+def handle_messages(handler, data, settings, official_manager=None):
     if not bridge_enabled(settings):
         return send_error(handler, BridgeError(
             503, 'api_error', 'The Claude Code official Codex bridge is disabled'))
@@ -1110,29 +1126,49 @@ def handle_messages(handler, data, settings):
     status = None
     total = 0
     route_lane = None
+    route_node = None
     stream_started = False
     translator = StreamTranslator(model, estimate_input_tokens(data))
+    connect_stats = {'connect_attempts': 0}
+    failure_stage = 'connect'
+    upload_seconds = None
+    headers_seconds = None
+    upload_timed_out = False
+    stream_error = None
+    request_bytes = 0
     try:
         headers = request_headers(settings)
-        connection = _open_connection(settings)
+        connection = _open_connection(settings, official_manager, connect_stats)
         route_lane = getattr(connection, 'route_lane', None)
+        route_node = getattr(connection, 'route_node', None)
         body = json.dumps(payload, ensure_ascii=False,
                           separators=(',', ':')).encode('utf-8')
+        request_bytes = len(body)
         budget = codex_router.upload_limit_seconds(len(body), settings, official=True)
         stall = _float_setting(settings, 'CodexOfficialUploadStallSeconds', 15)
-        codex_router.send_with_budget(
-            connection, 'POST', OFFICIAL_RESPONSES_PATH, body, headers, budget, stall)
+        failure_stage = 'send'
+        send_started = time.monotonic()
+        try:
+            codex_router.send_with_budget(
+                connection, 'POST', OFFICIAL_RESPONSES_PATH, body, headers, budget, stall)
+        finally:
+            upload_seconds = time.monotonic() - send_started
+        failure_stage = 'headers'
         _set_socket_timeout(connection, None,
                             _float_setting(settings, 'CodexOfficialHeadersTimeoutSeconds', 360))
+        headers_started = time.monotonic()
         response = connection.getresponse()
+        headers_seconds = time.monotonic() - headers_started
         status = response.status
         if status != 200:
             raw = response.read(65536)
+            failure_stage = None
             if status == 401:
                 invalidate_credentials()
             return send_error(handler, http_error(status, raw))
         encoding = (response.getheader('Content-Encoding') or '').strip().lower()
         if encoding not in ('', 'identity'):
+            failure_stage = None
             return send_error(handler, BridgeError(
                 502, 'api_error',
                 'Official Codex returned an unsupported content encoding'))
@@ -1142,6 +1178,7 @@ def handle_messages(handler, data, settings):
         _set_socket_timeout(
             connection, response,
             _float_setting(settings, 'CodexOfficialStreamIdleSeconds', 180))
+        failure_stage = 'response_body'
         decoder = SSEDecoder()
         while True:
             chunk = response.read1(65536)
@@ -1162,6 +1199,9 @@ def handle_messages(handler, data, settings):
             for name, item in translator.finish():
                 if stream:
                     write_sse(handler, name, item)
+        failure_stage = None
+        if translator.error_message:
+            stream_error = 'official_response_failed'
         if not stream:
             if translator.error_message:
                 return send_error(handler, BridgeError(
@@ -1173,13 +1213,21 @@ def handle_messages(handler, data, settings):
         else:
             send_error(handler, error)
     except codex_router.UploadTimeout:
+        upload_timed_out = True
+        failure_stage = 'send'
         error = BridgeError(504, 'api_error',
                             'Official Codex upload exceeded its gateway time budget')
         if stream_started:
             write_stream_error(handler, error.message, error.error_type)
         else:
             send_error(handler, error)
-    except (OSError, http.client.HTTPException):
+    except (OSError, http.client.HTTPException) as error:
+        stream_error = type(error).__name__
+        if status is None:
+            if failure_stage not in ('connect', 'send', 'headers'):
+                failure_stage = 'connect'
+        else:
+            failure_stage = 'response_body'
         message = ('Official Codex connection failed' if status is None
                    else 'Official Codex stream interrupted')
         error = BridgeError(502, 'api_error', message)
@@ -1193,9 +1241,24 @@ def handle_messages(handler, data, settings):
                 connection.close()
             except OSError:
                 pass
-        log('model=%s stream=%s status=%s bytes=%d seconds=%.2f lane=%s'
+        if official_manager is not None and (connect_stats['connect_attempts']
+                                             or status is not None):
+            try:
+                official_manager.record_request(
+                    upload_seconds=upload_seconds,
+                    headers_seconds=headers_seconds,
+                    failure_stage=failure_stage,
+                    upload_timed_out=upload_timed_out,
+                    stream_error=stream_error,
+                    tag=route_node,
+                    lane=route_lane,
+                    request_bytes=request_bytes,
+                    connect_attempts=connect_stats['connect_attempts'])
+            except (OSError, ValueError, TypeError):
+                pass
+        log('model=%s stream=%s status=%s bytes=%d seconds=%.2f lane=%s node=%s failure=%s'
             % (model, stream, status, total, time.monotonic() - started_at,
-               route_lane or '-'))
+               route_lane or '-', route_node or '-', failure_stage or '-'))
     return True
 
 

@@ -128,8 +128,9 @@ class GatewayTests(unittest.TestCase):
         import anthropic_codex_bridge as bridge
         calls = {}
 
-        def fake_bridge(handler, data, settings):
+        def fake_bridge(handler, data, settings, official_manager=None):
             calls['data'] = data
+            calls['official_manager'] = official_manager
             body = json.dumps({'bridged': data['model']}).encode()
             handler.send_response(200)
             handler.send_header('Content-Type', 'application/json')

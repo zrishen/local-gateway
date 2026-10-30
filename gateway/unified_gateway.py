@@ -139,6 +139,10 @@ def make_handler(settings, official_manager=None):
 
         do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = do_codex_method
 
+    # The bridge uses the same dedicated selector as the Codex router so a
+    # failed CONNECT can rotate the official node before falling back.
+    AIHandler.official_manager = official_manager
+
     class Handler(socketserver.BaseRequestHandler):
         def handle(self):
             client = self.request

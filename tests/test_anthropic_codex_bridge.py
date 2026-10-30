@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'gateway'))
 import anthropic_codex_bridge as bridge
@@ -467,9 +467,10 @@ class TranslatorTests(unittest.TestCase):
 
 
 class HandlerTests(AuthTestCase):
-    def run_bridge(self, request, response, settings=None):
+    def run_bridge(self, request, response, settings=None, official_manager=None,
+                   connections=None, connect_side_effect=None):
         handler = FakeHandler()
-        connection = FakeConnection(response)
+        connections = list(connections or [FakeConnection(response)])
         sent = {}
 
         def fake_send(conn, method, target, body, headers, budget, stall):
@@ -477,12 +478,14 @@ class HandlerTests(AuthTestCase):
                         headers=headers, budget=budget, stall=stall)
 
         with patch.object(bridge.codex_router, 'official_connection',
-                          return_value=connection), \
+                          side_effect=connections), \
                 patch.object(bridge.codex_router, 'connect_upstream',
-                             return_value=None), \
+                             side_effect=connect_side_effect), \
                 patch.object(bridge.codex_router, 'send_with_budget',
                              side_effect=fake_send):
-            result = bridge.handle_messages(handler, request, settings or SETTINGS)
+            result = bridge.handle_messages(
+                handler, request, settings or SETTINGS,
+                official_manager=official_manager)
         return handler, sent, result
 
     def streaming_chunks(self):
@@ -536,6 +539,39 @@ class HandlerTests(AuthTestCase):
         payload = json.loads(handler.body)
         self.assertEqual(payload['error']['type'], 'rate_limit_error')
         self.assertNotIn(b'secret-token', handler.body)
+
+    def test_connect_failure_rotates_official_node_before_retry(self):
+        settings = dict(SETTINGS, CodexOfficialSelector='official')
+        first = FakeConnection(FakeResponse())
+        second = FakeConnection(FakeResponse(chunks=self.streaming_chunks()))
+        manager = Mock()
+        manager.failover_after_connect_failure.return_value = {'tag': 'other'}
+        with patch.object(bridge.codex_router, 'mark_official_lane_failed') as marked:
+            handler, sent, _ = self.run_bridge(
+                message_request(), None, settings=settings,
+                official_manager=manager, connections=[first, second],
+                connect_side_effect=[OSError('reset'), None])
+        self.assertEqual(handler.status, 200)
+        manager.failover_after_connect_failure.assert_called_once_with('sakura-042')
+        marked.assert_not_called()
+        self.assertIs(sent['conn'], second)
+
+    def test_all_connect_failures_are_reported_to_official_manager(self):
+        settings = dict(SETTINGS, CodexOfficialSelector='official')
+        connections = [FakeConnection(FakeResponse()) for _ in range(4)]
+        manager = Mock()
+        manager.failover_after_connect_failure.return_value = None
+        with patch.object(bridge.codex_router, 'mark_official_lane_failed'):
+            handler, _, _ = self.run_bridge(
+                message_request(), None, settings=settings,
+                official_manager=manager, connections=connections,
+                connect_side_effect=[OSError('reset')] * 4)
+        self.assertEqual(handler.status, 502)
+        manager.record_request.assert_called_once()
+        kwargs = manager.record_request.call_args.kwargs
+        self.assertEqual(kwargs['failure_stage'], 'connect')
+        self.assertEqual(kwargs['connect_attempts'], 4)
+        self.assertIsNone(kwargs['lane'])
 
     def test_upstream_401_invalidates_cached_credentials(self):
         bridge.credential_headers()

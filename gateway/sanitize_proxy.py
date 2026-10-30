@@ -483,7 +483,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if _official:
                 if _path == "/v1/messages/count_tokens":
                     return bridge.handle_count_tokens(self, _d, PROJECT_SETTINGS)
-                return bridge.handle_messages(self, _d, PROJECT_SETTINGS)
+                return bridge.handle_messages(
+                    self, _d, PROJECT_SETTINGS,
+                    official_manager=getattr(self, 'official_manager', None))
         new_body, info = process_body(body)
         STATS["requests"] += 1
         if info:
