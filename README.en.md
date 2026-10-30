@@ -12,7 +12,7 @@ local-gateway is a local network gateway for Windows. It simplifies everyday net
 - Optionally connect to company networks.
 - Optionally import a Trojan subscription or work with SakuraCat.
 - Optionally provide local routing for Codex and AI services.
-- Optionally let Claude Code use official Codex models (`codex/gpt-6.1-sol`, `codex/gpt-6-astra`).
+- Optionally let Claude Code use official Codex models.
 
 The project runs only on your local machine. It does not provide a public proxy or public API.
 

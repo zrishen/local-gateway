@@ -12,7 +12,7 @@ local-gateway 是一个在本机运行的 Windows 网络入口，用来统一管
 - 可选接入公司内网。
 - 可选导入 Trojan 订阅，或配合 SakuraCat 使用。
 - 可选为 Codex 和 AI 服务提供本地路由。
-- 可选让 Claude Code 使用 Codex 官方模型（`codex/gpt-6.1-sol`、`codex/gpt-6-astra`）。
+- 可选让 Claude Code 使用 Codex 官方模型。
 
 项目只在本机运行，不提供公共代理或公共 API。
 
