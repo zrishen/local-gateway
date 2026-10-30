@@ -149,7 +149,7 @@ class OfficialRouteTests(unittest.TestCase):
         self.assertTrue(state['last_request']['oversized_upload'])
         self.assertFalse(manager._degraded)
 
-    def test_repeated_all_lane_connect_failure_requests_a_scan(self):
+    def test_fallback_lane_connect_failure_only_requests_a_scan(self):
         root = self.temp_root()
         controller = FakeController(['a'])
         manager = self.manager(root, controller, {'a': self.good(90, 150)})
@@ -160,7 +160,21 @@ class OfficialRouteTests(unittest.TestCase):
         self.assertFalse(manager._degraded)
         manager.record_request(failure_stage='connect', lane='project',
                                connect_attempts=4)
+        self.assertFalse(manager._degraded)
+        self.assertNotIn('a', manager._failed_nodes)
+
+    def test_repeated_official_connect_failure_degrades_the_lane(self):
+        root = self.temp_root()
+        controller = FakeController(['a'])
+        manager = self.manager(root, controller, {'a': self.good(90, 150)})
+        manager.select_once()
+        manager.record_request(failure_stage='connect', lane='codex-official',
+                               connect_attempts=4)
+        self.assertFalse(manager._degraded)
+        manager.record_request(failure_stage='connect', lane=None,
+                               connect_attempts=4)
         self.assertTrue(manager._degraded)
+        self.assertIn('a', manager._failed_nodes)
 
     def test_probe_candidate_hits_download_chatgpt_and_codex_path(self):
         calls = []

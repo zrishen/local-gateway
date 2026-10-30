@@ -175,12 +175,27 @@ if ($OutputName) {
     $name = $OutputName
 }
 $path = Join-Path $Root $name
+$staging = Join-Path $Root ($name + '.stage')
+$backup = Join-Path $Root ($name + '.previous')
 $json = $config | ConvertTo-Json -Depth 30
-[IO.File]::WriteAllText($path, $json, [Text.UTF8Encoding]::new($false))
-& $Settings.PythonPath -B (Join-Path $Root 'gateway\stable_json.py') $path
-if ($LASTEXITCODE -ne 0) { throw "Could not canonicalize $name" }
-& $Core check -D $Root -c $path
-if ($LASTEXITCODE -ne 0) { throw "sing-box rejected $name" }
+try {
+    [IO.File]::WriteAllText($staging, $json, [Text.UTF8Encoding]::new($false))
+    & $Settings.PythonPath -B (Join-Path $Root 'gateway\stable_json.py') $staging
+    if ($LASTEXITCODE -ne 0) { throw "Could not canonicalize $name" }
+    & $Core check -D $Root -c $staging
+    if ($LASTEXITCODE -ne 0) { throw "sing-box rejected $name" }
+    # Publish only after the staged file passes canonicalization and check.
+    # A failed refresh must leave the live config.json untouched.
+    if (Test-Path -LiteralPath $path) {
+        [IO.File]::Replace($staging, $path, $backup)
+    } else {
+        Move-Item -LiteralPath $staging -Destination $path
+    }
+} finally {
+    if (Test-Path -LiteralPath $staging) {
+        Remove-Item -LiteralPath $staging -Force -ErrorAction SilentlyContinue
+    }
+}
 $upstreamMode = if ($embeddedUpstream) { 'subscription' } else { 'sakuracat' }
 $nodeCount = if ($embeddedUpstream) { [int]$embeddedUpstream.count } else { 0 }
 Write-StateJson (Join-Path $StateDir 'upstream.json') @{Mode=$upstreamMode;NodeCount=$nodeCount;UpdatedAt=(Get-Date -Format o)}

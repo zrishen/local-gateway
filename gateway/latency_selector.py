@@ -8,7 +8,7 @@ passes real HTTPS and ChatGPT checks through the local gateway.
 import argparse
 import concurrent.futures
 import http.client
-from isolated_probes import IsolatedProbePool
+from isolated_probes import IsolatedProbePool, configured_tags
 import json
 import logging
 import os
@@ -42,7 +42,8 @@ HEALTH_FAILURE_LIMIT = 2
 HEALTH_CANDIDATES = 3
 HEALTH_IMPROVEMENT_RATIO = 1.25
 HEALTH_IMPROVEMENT_KBPS = 8
-HEALTH_REJECTION_SECONDS = 1800
+HEALTH_REJECTION_SECONDS = 300
+ENTRY_REJECTION_SECONDS = 60
 CROSS_REGION_PROBES_PER_REGION = 2
 CROSS_REGION_CANDIDATES = 4
 
@@ -94,6 +95,11 @@ class LatencySelector:
         self.health_interval = max(0, int(health_minutes * 60))
         self.timeout = timeout
         self.workers = workers
+        self.probe_timeout_seconds = max(1.0, float(settings.get('SakuraProbeTimeoutSeconds', 12)))
+        self.rejection_seconds = max(1, int(float(settings.get('SakuraRejectionSeconds', 300))))
+        self.restore_verify_seconds = max(1.0, float(settings.get('SakuraRestoreVerifySeconds', 15)))
+        self.candidate_probe_limit = max(1, int(float(settings.get('SakuraCandidateProbeLimit', 20))))
+        self.scan_budget_seconds = max(10.0, float(settings.get('SakuraScanBudgetSeconds', 180)))
         self.minimum_throughput_kbps = max(0, int(settings.get('SakuraMinimumThroughputKBps', 50)))
         self.policy = route_policy.policy_from_settings(settings)
         self.tun_validation = bool(settings.get('SakuraTunValidation', True))
@@ -119,10 +125,11 @@ class LatencySelector:
         self.next_recovery_at = 0.0
         self.pending_switch = None
         self.rejected_candidates = {}
+        self.rejected_entries = {}
         self.last_health = {}
         self._load_health_state()
 
-    def request(self, path, method='GET', body=None):
+    def request(self, path, method='GET', body=None, timeout=None):
         headers = {'Authorization': 'Bearer ' + self.secret}
         data = None
         if body is not None:
@@ -130,7 +137,8 @@ class LatencySelector:
             headers['Content-Type'] = 'application/json'
         request = urllib.request.Request(f'http://127.0.0.1:{self.port}{path}', data=data,
                                          headers=headers, method=method)
-        with self.opener.open(request, timeout=self.timeout + 2) as response:
+        wait = self.timeout + 2 if timeout is None else max(1.0, float(timeout))
+        with self.opener.open(request, timeout=wait) as response:
             raw = response.read()
             return json.loads(raw) if raw else None
 
@@ -162,8 +170,10 @@ class LatencySelector:
         rejected = value.get('rejected_candidates')
         if isinstance(rejected, dict):
             now = time.time()
+            limit = now + self.rejection_seconds
             self.rejected_candidates = {
-                str(tag): float(until) for tag, until in rejected.items()
+                str(tag): min(float(until), limit)
+                for tag, until in rejected.items()
                 if isinstance(until, (int, float)) and float(until) > now
             }
         last = value.get('last_health')
@@ -283,26 +293,137 @@ class LatencySelector:
                 return region, info, data
         return None, None, data
 
-    def measure(self, tag):
-        """Try independent HTTPS endpoints and keep the best successful RTT.
+    def _proxy_info(self, tag):
+        try:
+            value = self.request('/proxies/' + urllib.parse.quote(tag, safe=''),
+                                 timeout=self.timeout + 2)
+        except (OSError, http.client.HTTPException, ValueError, TypeError):
+            return {}
+        return value if isinstance(value, dict) else {}
 
-        A single endpoint can be blocked or temporarily slow for a healthy node.
-        Multiple fixed-size probes keep one failed route from hiding a usable node.
+    def _entry_tags(self, tag):
+        """Return every entry behind a urltest node, current entry first.
+
+        A single dead entry IP used to hide a healthy node. Reading the
+        urltest's ``all`` list lets the selector retry the other entries
+        without changing the production selector.
         """
+        info = self._proxy_info(tag)
+        entries = []
+        now = info.get('now')
+        if isinstance(now, str) and now:
+            entries.append(now)
+        all_entries = info.get('all')
+        if isinstance(all_entries, list):
+            for entry in all_entries:
+                if isinstance(entry, str) and entry and entry not in entries:
+                    entries.append(entry)
+        if not entries:
+            entries.append(tag)
+        now_epoch = time.time()
+        usable = [entry for entry in entries
+                  if self.rejected_entries.get(entry, 0) <= now_epoch]
+        return usable or entries
+
+    def _note_entry_failure(self, entry):
+        self.rejected_entries[entry] = time.time() + ENTRY_REJECTION_SECONDS
+
+    def _clear_entry_on_success(self, entry):
+        self.rejected_entries.pop(entry, None)
+
+    def _entry_delay(self, entry, first_success=False, urls=PROBE_URLS, timeout=None):
         delays = []
         errors = []
-        for url in PROBE_URLS:
-            query = urllib.parse.urlencode({'url': url, 'timeout': int(self.timeout * 1000)})
+        for url in urls:
+            query = urllib.parse.urlencode({'url': url,
+                                            'timeout': int(self.probe_timeout_seconds * 1000)})
             try:
-                payload = self.request('/proxies/' + urllib.parse.quote(tag, safe='') + '/delay?' + query)
+                payload = self.request(
+                    '/proxies/' + urllib.parse.quote(entry, safe='') + '/delay?' + query,
+                    timeout=timeout or self.probe_timeout_seconds + 3)
                 delay = int(payload.get('delay', 0))
-                if delay > 0:
-                    delays.append(delay)
             except Exception as error:
                 errors.append(f'{url}: {type(error).__name__}')
+                continue
+            if delay > 0:
+                if first_success:
+                    return delay
+                delays.append(delay)
         if delays:
             return min(delays)
-        raise ValueError('all probe endpoints failed: ' + '; '.join(errors))
+        raise ValueError('entry probe failed: ' + ('; '.join(errors) or 'no delay'))
+
+    def _reject_node(self, tag, reason, verify_entries=False):
+        if not tag:
+            return False
+        if verify_entries:
+            check = self._verify_live_node(tag)
+            if check.get('ok'):
+                logging.info('Sakura selector: keep %s; entry %s is still reachable',
+                             tag, check.get('entry'))
+                return False
+        self.rejected_candidates[tag] = max(
+            self.rejected_candidates.get(tag, 0), time.time() + self.rejection_seconds)
+        logging.info('Sakura selector: rejected %s for %d seconds (%s)',
+                     tag, self.rejection_seconds, reason)
+        return True
+
+    def _verify_live_node(self, tag):
+        """Verify a node through its own entries before restoring it."""
+        try:
+            top = self.request('/proxies/sakura',
+                               timeout=min(3.0, self.restore_verify_seconds))
+        except (OSError, http.client.HTTPException, ValueError, TypeError):
+            return {'ok': False, 'reason': 'controller_unreachable'}
+        if not isinstance(top, dict):
+            return {'ok': False, 'reason': 'controller_unreachable'}
+        deadline = time.monotonic() + self.restore_verify_seconds
+        for entry in self._entry_tags(tag):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                delay = self._entry_delay(
+                    entry, first_success=True,
+                    timeout=min(self.probe_timeout_seconds + 3, remaining))
+            except (OSError, http.client.HTTPException, ValueError, TypeError):
+                self._note_entry_failure(entry)
+                continue
+            self._clear_entry_on_success(entry)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                chatgpt_ms = self._chatgpt_delay(
+                    entry, timeout=min(self.probe_timeout_seconds + 3, remaining))
+            except (OSError, http.client.HTTPException, ValueError, TypeError):
+                continue
+            return {'ok': True, 'entry': entry, 'delay': delay,
+                    'chatgpt_ms': chatgpt_ms}
+        return {'ok': False, 'reason': 'no live entry'}
+
+    def measure(self, tag):
+        """Try every entry and independent HTTPS endpoint on a candidate.
+
+        A urltest node may point at a dead entry IP while another entry is
+        healthy. Trying all entries prevents one bad address from rejecting a
+        usable node; only when every entry fails is the node rejected.
+        """
+        best = None
+        errors = []
+        for entry in self._entry_tags(tag):
+            try:
+                delay = self._entry_delay(entry)
+            except (OSError, http.client.HTTPException, ValueError, TypeError) as error:
+                errors.append(f'{entry}: {type(error).__name__}')
+                self._note_entry_failure(entry)
+                continue
+            self._clear_entry_on_success(entry)
+            best = delay if best is None else min(best, delay)
+        if best is not None:
+            return best
+        self._reject_node(tag, 'all entries failed')
+        raise ValueError('all entries failed: ' + '; '.join(errors))
 
     def _selection_members(self, data):
         names = data.get('names') or {}
@@ -339,7 +460,7 @@ class LatencySelector:
                     'name': fallback.get('name') or names.get(tag, tag)}
         return {'tag': tag, 'name': names.get(tag, tag), 'region': '', 'group': ''}
 
-    def _recovery_candidates(self, current, info, data):
+    def _recovery_candidates(self, region, current, info, data):
         """Use the last full scan's shortlist instead of rescanning a region."""
         selected = []
         try:
@@ -347,22 +468,40 @@ class LatencySelector:
                 (self.root / 'state/sakura-selection.json').read_text(encoding='utf-8'))
         except (OSError, ValueError, TypeError):
             snapshot = {}
+
+        def add(tag):
+            if (isinstance(tag, str) and tag and tag != current
+                    and tag not in selected):
+                selected.append(tag)
+
         for item in snapshot.get('candidates') or []:
-            if not isinstance(item, dict):
-                continue
-            tag = item.get('tag')
-            if tag and tag != current and tag not in selected:
-                selected.append(tag)
+            if isinstance(item, dict):
+                add(item.get('tag'))
+        names = data.get('names') or {}
         for tag in info.get('nodes', []):
-            if tag != current and tag not in selected and '倍消耗' not in (
-                    (data.get('names') or {}).get(tag, tag)):
-                selected.append(tag)
+            if '倍消耗' not in names.get(tag, tag):
+                add(tag)
+        groups = data.get('region_groups') or {}
+        if self.selection_regions:
+            for other in self.selection_regions:
+                if other == region:
+                    continue
+                count = 0
+                for tag in (groups.get(other) or {}).get('nodes', []):
+                    if '倍消耗' in names.get(tag, tag) or tag == current:
+                        continue
+                    if tag in selected:
+                        continue
+                    add(tag)
+                    count += 1
+                    if count >= CROSS_REGION_PROBES_PER_REGION:
+                        break
         members = []
-        for tag in [current] + selected[:3]:
+        for tag in [current] + selected[:5]:
             item = self._member_for_tag(data, tag)
             if item['group']:
                 members.append(item)
-        return members
+        return members[:6]
 
     def _route_view(self, item):
         if not item:
@@ -407,7 +546,7 @@ class LatencySelector:
         return bool(item.get('health') == 'healthy' and item.get('chatgpt_ok'))
 
     def _write_selection(self, regions, active, candidate, ranked, applied,
-                         reachable, total, error=None):
+                         reachable, total, error=None, persist=True):
         active = active or {}
         assessment = route_policy.assess(active, self.policy)
         snapshot = {
@@ -456,6 +595,25 @@ class LatencySelector:
             snapshot['active_tag'] = active['tag']
         if candidate and candidate.get('tag') != active.get('tag'):
             snapshot['candidate_tag'] = candidate.get('tag')
+        if error and not ranked:
+            # A failed full scan is not evidence that the previous shortlist
+            # is bad. Keep it for targeted recovery instead of erasing it.
+            try:
+                previous = json.loads(
+                    (self.root / 'state/sakura-selection.json').read_text(encoding='utf-8'))
+            except (OSError, ValueError, TypeError):
+                previous = {}
+            old_candidates = previous.get('candidates')
+            if isinstance(old_candidates, list) and old_candidates:
+                snapshot['candidates'] = old_candidates
+                snapshot['stale_candidates'] = True
+            old_candidate = previous.get('candidate')
+            if isinstance(old_candidate, dict):
+                snapshot['candidate'] = old_candidate
+            if previous.get('candidate_tag'):
+                snapshot['candidate_tag'] = previous['candidate_tag']
+        if not persist:
+            return snapshot
         write_json(self.root / 'state/sakura-selection.json', snapshot)
         return snapshot
 
@@ -525,12 +683,17 @@ class LatencySelector:
 
         if not results:
             self._write_selection(regions, previous_route, None, [], False, 0,
-                                  len(members), 'no reachable nodes')
+                                  len(members), 'no reachable nodes', persist=apply)
             return None
 
         results.sort(key=lambda item: (item['delay'], item['tag']))
+        probe_candidates = results[:self.candidate_probe_limit]
+        if previous:
+            previous_item = next((item for item in results if item['tag'] == previous), None)
+            if previous_item is not None and previous_item not in probe_candidates:
+                probe_candidates.append(previous_item)
         try:
-            verified = self._measure_candidates(results)
+            verified = self._measure_candidates(probe_candidates)
         except (OSError, ValueError, KeyError) as error:
             logging.warning('Isolated node probes unavailable: %s; keeping current route',
                             type(error).__name__)
@@ -544,7 +707,7 @@ class LatencySelector:
         if not ranked:
             self._write_selection(regions, previous_route, None, [], False,
                                   len(results), len(members),
-                                  'no node passed the end-to-end check')
+                                  'no node passed the end-to-end check', persist=apply)
             return None
 
         current = next((item for item in ranked if item['tag'] == previous), None)
@@ -556,7 +719,7 @@ class LatencySelector:
                 **self.last_health,
             }
             self._write_selection(regions, active, chosen, ranked, False,
-                                  len(results), len(members))
+                                  len(results), len(members), persist=False)
             return self._route_view(chosen)
 
         if current is not None and chosen['tag'] == current['tag'] and not self.tun_validation:
@@ -598,7 +761,7 @@ class LatencySelector:
                         pass
                 self._write_selection(regions, previous_route, chosen, ranked,
                                       False, len(results), len(members),
-                                      'no finalist passed the TUN check')
+                                      'no finalist passed the TUN check', persist=apply)
                 return None
 
         self._set_group(selected['group'], selected['tag'])
@@ -626,16 +789,28 @@ class LatencySelector:
         The best three receive three samples each. Median speed reduces the
         influence of a lucky small transfer; downloads remain sequential so
         the benchmark does not make candidates compete for local bandwidth.
+        The scan has a hard total budget so a pool of dead nodes cannot stall
+        the selector or the shared probe lock indefinitely.
         """
+        available = configured_tags(self.root)
+        if available:
+            candidates = [item for item in candidates if item.get('tag') in available]
+        if not candidates:
+            return []
+        deadline = time.monotonic() + self.scan_budget_seconds
         verified = []
         with IsolatedProbePool(self.root, [item['tag'] for item in candidates]) as probes:
             for candidate in candidates:
+                if time.monotonic() >= deadline:
+                    break
                 quality = self._candidate_quality(probes.ports[candidate['tag']])
                 if quality.get('ok'):
                     verified.append({**candidate, **quality})
             verified.sort(key=lambda item: (
                 measured_throughput_kbps(item), item.get('throughput_kbps', 0)), reverse=True)
             for candidate in verified[:3]:
+                if time.monotonic() >= deadline:
+                    break
                 samples = [dict(candidate)] + [self._candidate_quality(probes.ports[candidate['tag']])
                                          for _ in range(2)]
                 successful = [item for item in samples if item.get('ok')]
@@ -775,17 +950,34 @@ class LatencySelector:
     def _set_top_region(self, group):
         self.request('/proxies/sakura', 'PUT', {'name': group})
 
-    def _chatgpt_probe(self, tag):
+    def _chatgpt_delay(self, entry, timeout=None):
         query = urllib.parse.urlencode({
             'url': 'https://chatgpt.com/robots.txt',
-            'timeout': int(self.timeout * 1000),
+            'timeout': int(self.probe_timeout_seconds * 1000),
         })
         payload = self.request(
-            '/proxies/' + urllib.parse.quote(tag, safe='') + '/delay?' + query)
+            '/proxies/' + urllib.parse.quote(entry, safe='') + '/delay?' + query,
+            timeout=timeout or self.probe_timeout_seconds + 3)
         delay = int(payload.get('delay', 0))
         if delay <= 0:
             raise ValueError('ChatGPT probe returned no delay')
         return delay
+
+    def _chatgpt_probe(self, tag):
+        best = None
+        errors = []
+        for entry in self._entry_tags(tag):
+            try:
+                delay = self._chatgpt_delay(entry)
+            except (OSError, http.client.HTTPException, ValueError, TypeError) as error:
+                errors.append(f'{entry}: {type(error).__name__}')
+                self._note_entry_failure(entry)
+                continue
+            self._clear_entry_on_success(entry)
+            best = delay if best is None else min(best, delay)
+        if best is not None:
+            return best
+        raise ValueError('ChatGPT probe failed on all entries: ' + '; '.join(errors))
 
     def _fallback_region_names(self, data, current_region, only_region=None):
         if not self.cross_region_fallback:
@@ -853,7 +1045,7 @@ class LatencySelector:
                 except Exception as error:
                     logging.debug('Sakura cross-region %s/%s unavailable: %s',
                                   region, tag, error)
-                    self.rejected_candidates[tag] = time.time() + HEALTH_REJECTION_SECONDS
+                    self._reject_node(tag, 'cross-region control probe failed')
         available.sort(key=lambda item: (not item['preferred'], item['delay'], item['tag']))
         for candidate in available[:CROSS_REGION_CANDIDATES]:
             region, tag = candidate['region'], candidate['tag']
@@ -866,11 +1058,13 @@ class LatencySelector:
                         or measured_throughput_kbps(quality)
                         < self.policy.minimum_effective_kbps):
                     if quality.get('health') == 'disconnected':
-                        self.rejected_candidates[tag] = time.time() + HEALTH_REJECTION_SECONDS
+                        self._reject_node(tag, 'cross-region quality disconnected',
+                                          verify_entries=True)
                     continue
                 chatgpt = self.verify_chatgpt()
                 if not chatgpt.get('ok'):
-                    self.rejected_candidates[tag] = time.time() + HEALTH_REJECTION_SECONDS
+                    self._reject_node(tag, 'cross-region ChatGPT probe failed',
+                                      verify_entries=True)
                     continue
                 logging.info('Sakura health: cross-region fallback %s/%s '
                              '(%s ms, effective %s KB/s, body %s KB/s)',
@@ -882,7 +1076,7 @@ class LatencySelector:
             except (OSError, http.client.HTTPException, ValueError, ssl.SSLError) as error:
                 logging.debug('Sakura cross-region %s/%s probe failed: %s',
                               region, tag, error)
-                self.rejected_candidates[tag] = time.time() + HEALTH_REJECTION_SECONDS
+                self._reject_node(tag, 'cross-region probe failed')
         return None
 
     def _find_recovery_candidate(self, info, data, current, baseline):
@@ -900,7 +1094,7 @@ class LatencySelector:
                     delays.append({'tag': tag, 'delay': future.result()})
                 except Exception as error:
                     logging.debug('Sakura health candidate %s unavailable: %s', tag, error)
-                    self.rejected_candidates[tag] = time.time() + HEALTH_REJECTION_SECONDS
+                    self._reject_node(tag, 'recovery control probe failed')
         delays.sort(key=lambda item: (item['delay'], item['tag']))
         for candidate in delays[:HEALTH_CANDIDATES]:
             tag = candidate['tag']
@@ -910,17 +1104,19 @@ class LatencySelector:
                 if not route_policy.is_meaningfully_better(
                         quality, baseline, self.policy):
                     if quality.get('health') == 'disconnected':
-                        self.rejected_candidates[tag] = time.time() + HEALTH_REJECTION_SECONDS
+                        self._reject_node(tag, 'recovery quality disconnected',
+                                          verify_entries=True)
                     continue
                 chatgpt = self.verify_chatgpt()
                 if not chatgpt.get('ok'):
-                    self.rejected_candidates[tag] = time.time() + HEALTH_REJECTION_SECONDS
+                    self._reject_node(tag, 'recovery ChatGPT probe failed',
+                                      verify_entries=True)
                     continue
                 return {'tag': tag, 'name': names.get(tag, tag), 'delay': candidate['delay'],
                         **quality, **chatgpt}
             except (OSError, http.client.HTTPException, ValueError, ssl.SSLError) as error:
                 logging.debug('Sakura health candidate %s probe failed: %s', tag, error)
-                self.rejected_candidates[tag] = time.time() + HEALTH_REJECTION_SECONDS
+                self._reject_node(tag, 'recovery probe failed')
         return None
 
     def _begin_pending_switch(self, region, info, current, chosen, baseline):
@@ -967,7 +1163,7 @@ class LatencySelector:
             # Targeted recovery: compare the live node with the last scan's
             # shortlist only. A failed node no longer triggers a full US/SG
             # rescan, and candidate probes never change the production route.
-            members = self._recovery_candidates(current, info, data)
+            members = self._recovery_candidates(region, current, info, data)
             selected = self.select_once(candidates=members, apply=False)
             if selected:
                 baseline_health = baseline.get('health', 'disconnected')
@@ -1059,43 +1255,117 @@ class LatencySelector:
         }
         return self._begin_pending_switch(region, info, current, chosen, baseline)
 
+    def _group_for_tag(self, tag):
+        """Resolve the region group for a node in persisted state.
+
+        Older pending-switch snapshots did not always store group names; the
+        subscription state is the authoritative mapping.
+        """
+        if not tag:
+            return {}
+        try:
+            data = self.state()
+        except (OSError, ValueError, TypeError):
+            return {}
+        member = self._member_for_tag(data, tag)
+        return {'region': member.get('region') or '', 'group': member.get('group') or ''}
+
     def _finish_pending_switch(self, decision, result, reason):
         previous = decision['previous_tag']
         switched = decision['switched_tag']
-        previous_group = (decision.get('previous_group') or decision.get('group')
-                          or self.last_health.get('group'))
-        previous_region = decision.get('previous_region') or self.last_health.get('region')
-        switched_group = decision.get('switched_group') or self.last_health.get('group')
-        switched_region = decision.get('switched_region') or self.last_health.get('region')
-        if decision.get('restore', False):
-            self._set_top_region(previous_group)
-            self._set_group(previous_group, previous)
-            self.rejected_candidates[switched] = time.time() + HEALTH_REJECTION_SECONDS
-            logging.warning(
-                'Sakura health: %s; restored %s/%s and rejected %s for %d minutes',
-                reason, previous_region, previous, switched, HEALTH_REJECTION_SECONDS // 60)
-        else:
+        previous_group = decision.get('previous_group') or ''
+        previous_region = decision.get('previous_region') or ''
+        switched_group = decision.get('switched_group') or ''
+        switched_region = decision.get('switched_region') or ''
+        if not previous_group:
+            previous_info = self._group_for_tag(previous)
+            previous_group = previous_info.get('group') or ''
+            previous_region = previous_region or previous_info.get('region') or ''
+        if not switched_group:
+            switched_info = self._group_for_tag(switched)
+            switched_group = switched_info.get('group') or ''
+            switched_region = switched_region or switched_info.get('region') or ''
+        previous_region = previous_region or self.last_health.get('region')
+        switched_region = switched_region or self.last_health.get('region')
+        outcome = {
+            'reason': reason,
+            'samples': decision.get('samples') or [],
+            'current_health': result,
+        }
+        if not decision.get('restore', False):
             samples = decision.get('samples') or []
             measured = [measured_throughput_kbps(item) if isinstance(item, dict)
                         else float(item) for item in samples]
             logging.info('Sakura health: kept %s/%s after two rounds (%s KB/s)',
                          switched_region, switched,
                          statistics.median(measured) if measured else 0)
+            self.pending_switch = None
+            self.health_failures = 0
+            self._note_recovery_success()
+            outcome.update(action='accept', region=switched_region, tag=switched)
+            self._save_health_state(last_transition=outcome)
+            return outcome
+
+        # A rollback must not blindly select a dead node. Verify both sides
+        # through their own entries before touching the production selectors.
+        previous_check = self._verify_live_node(previous)
+        if previous_check.get('reason') == 'controller_unreachable':
+            self.pending_switch = dict(decision)
+            self._save_health_state()
+            outcome.update(action='pending', region=switched_region, tag=switched,
+                           reason='controller unreachable; keeping observation')
+            return outcome
+        if not previous_group:
+            self.pending_switch = dict(decision)
+            self._save_health_state()
+            outcome.update(action='pending', region=switched_region, tag=switched,
+                           reason='previous group unknown; keeping observation')
+            return outcome
+        switched_check = self._verify_live_node(switched)
+        if previous_check.get('ok'):
+            # Point the inner group first, then the top selector, mirroring
+            # _begin_pending_switch so no intermediate node is ever exposed.
+            self._set_group(previous_group, previous)
+            self._set_top_region(previous_group)
+            # A slow but working switched node is not a failed node. Reject it
+            # only when it is actually unusable, not for "no improvement".
+            if (not switched_check.get('ok')
+                    and result.get('health') in ('disconnected', 'blocked')):
+                self._reject_node(switched, 'switched node failed restore verification')
+            logging.warning(
+                'Sakura health: %s; restored %s/%s (switched %s usable=%s)',
+                reason, previous_region, previous, switched,
+                bool(switched_check.get('ok')))
+            self.pending_switch = None
+            self.health_failures = 0
+            self._note_recovery_success()
+            outcome.update(action='restore', region=previous_region, tag=previous,
+                           switched_usable=bool(switched_check.get('ok')))
+            self._save_health_state(last_transition=outcome)
+            return outcome
+        self._reject_node(previous, 'previous node failed restore verification')
+        if switched_check.get('ok'):
+            self.pending_switch = None
+            self.health_failures = 0
+            self._note_recovery_success()
+            logging.warning(
+                'Sakura health: previous %s/%s failed verification; kept %s/%s',
+                previous_region, previous, switched_region, switched)
+            outcome.update(action='accept', region=switched_region, tag=switched,
+                           reason='previous node failed verification; kept switched node')
+            self._save_health_state(last_transition=outcome)
+            return outcome
+        self._reject_node(switched, 'switched node failed restore verification')
         self.pending_switch = None
         self.health_failures = 0
-        restore = decision.get('restore', False)
-        if restore:
-            self._note_recovery_failure()
-        else:
-            self._note_recovery_success()
-        outcome = {
-            'action': 'restore' if restore else 'accept',
-            'region': previous_region if restore else switched_region,
-            'tag': previous if restore else switched,
-            'reason': reason,
-            'samples': decision['samples'],
-            'current_health': result,
-        }
+        self.recovery_failures += 1
+        self.next_recovery_at = 0
+        logging.warning(
+            'Sakura health: both %s/%s and %s/%s failed verification; immediate recovery',
+            previous_region, previous, switched_region, switched)
+        outcome.update(action='recover', region=switched_region, tag=switched,
+                       needs_recovery=True,
+                       reason='both nodes failed restore verification')
         self._save_health_state(last_transition=outcome)
         return outcome
 
@@ -1158,6 +1428,11 @@ class LatencySelector:
         outcome = None
         if self.pending_switch:
             outcome = self._observe_pending_switch(current, result)
+            if outcome and outcome.get('needs_recovery'):
+                # Both the restored candidate and the switched node failed
+                # verification; do not wait for the next five-minute tick.
+                outcome['recovery'] = self._recover_current(
+                    region, info, data, current, result)
         elif result['health'] == 'disconnected':
             if self._recovery_due():
                 outcome = self._recover_current(region, info, data, current, result)
@@ -1200,6 +1475,21 @@ class LatencySelector:
         except Exception:
             return None
 
+    def _initial_refresh(self):
+        """Resume an in-flight observation after a restart.
+
+        Clearing a pending switch on every restart silently discards the
+        two-round check and can leave the route on an unverified node. Observe
+        it once, then run the normal full scan from the resulting state.
+        """
+        if not self.pending_switch:
+            return self.select_once()
+        logging.info('Sakura selector: resuming pending switch observation after restart')
+        self.health_check_once()
+        if self.stop.wait(30):
+            return None
+        return self.select_once()
+
     def run(self):
         last_full = None
         last_health = 0.0
@@ -1207,7 +1497,7 @@ class LatencySelector:
             now = time.monotonic()
             try:
                 if last_full is None:
-                    self.select_once()
+                    self._initial_refresh()
                     last_full = time.monotonic()
                     last_health = last_full
                 elif (not self.pending_switch and now - last_full >= self.interval):

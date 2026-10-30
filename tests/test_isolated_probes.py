@@ -1,6 +1,7 @@
 import copy
 import io
 import http.client
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -9,7 +10,7 @@ from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'gateway'))
-from isolated_probes import probe_config
+from isolated_probes import configured_tags, probe_config
 from latency_selector import LatencySelector
 
 
@@ -21,6 +22,18 @@ class ProbeTests(unittest.TestCase):
         (root / 'state').mkdir()
         (root / 'state/controller-secret.txt').write_text('test-only')
         return LatencySelector(root, {'ControllerPort': 1, 'MixedPort': 2})
+
+    def test_configured_tags_reads_generated_outbounds(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'config.json').write_text(json.dumps({'outbounds': [
+                {'type': 'direct', 'tag': 'direct'},
+                {'type': 'trojan', 'tag': 'a'},
+                {'type': 'selector', 'tag': 'group'},
+            ]}), encoding='utf-8')
+            self.assertEqual(configured_tags(root), {'direct', 'a', 'group'})
+        with tempfile.TemporaryDirectory() as temporary:
+            self.assertEqual(configured_tags(Path(temporary)), set())
 
     def test_isolated_config_preserves_entries_without_production_tun_or_controller(self):
         source = {'outbounds': [

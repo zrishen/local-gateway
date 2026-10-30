@@ -14,7 +14,7 @@ import socketserver
 import threading
 import time
 import urllib.parse
-from gateway_activity import ai_request, active_requests
+from gateway_activity import ai_request, request_stats
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -110,9 +110,13 @@ def make_handler(settings, official_manager=None):
                     state = json.loads((ROOT / 'state/mode.json').read_text())
                 except (OSError, ValueError):
                     state = {'mode': 'starting'}
+                active, oldest = request_stats()
+                real_active = max(0, active - 1)
                 body = json.dumps({
                     'service': 'unified-gateway', **state,
-                    'active_ai_requests': max(0, active_requests() - 1),
+                    'active_ai_requests': real_active,
+                    **({'oldest_ai_request_age_seconds': round(oldest, 1)}
+                       if real_active > 0 else {}),
                     'codex_official': _status_summary('codex-official-route.json'),
                     'sakura_route': _status_summary('sakura-selection.json'),
                 }).encode()

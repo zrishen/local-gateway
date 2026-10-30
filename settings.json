@@ -19,7 +19,8 @@
   "SakuraRegion": "美国",
   "SakuraSelectionRegions": [
     "美国",
-    "新加坡"
+    "新加坡",
+    "日本"
   ],
   "SakuraCrossRegionFallback": true,
   "SakuraFallbackRegions": [
@@ -77,5 +78,11 @@
   "SakuraEndpointProbeCandidatesPerNode": 8,
   "AiUpstream": "",
   "CompanyProbeHosts": [],
-  "EmbeddedStateGraceSeconds": 30
+  "EmbeddedStateGraceSeconds": 30,
+  "SakuraRejectionSeconds": 300,
+  "SakuraEndpointReloadStaleRequestSeconds": 600,
+  "SakuraEndpointReloadRecoveryFailures": 2,
+  "SakuraCandidateProbeLimit": 20,
+  "SakuraScanBudgetSeconds": 180,
+  "SakuraRestoreVerifySeconds": 15
 }

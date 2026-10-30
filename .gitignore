@@ -8,6 +8,8 @@
 /config.next.json
 /config.stage.json
 /config.*.json
+/config*.json.stage
+/config*.json.previous
 
 # Machine-local overrides and secrets
 /settings.local.json

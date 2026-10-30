@@ -2,8 +2,9 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'gateway'))
 import latency_selector as ls
@@ -56,7 +57,7 @@ class SelectionQualityTests(unittest.TestCase):
                                              'SakuraTunValidation': False})
         selected = []
 
-        def request(path, method='GET', body=None):
+        def request(path, method='GET', body=None, timeout=None):
             if path == '/proxies/sakura' and method == 'GET':
                 return {'type': 'Selector', 'now': 'region-group'}
             if path == '/proxies/sakura' and method == 'PUT':
@@ -152,7 +153,7 @@ class SelectionPoolTests(unittest.TestCase):
         selected = []
         region = {'name': 'region-us'}
 
-        def request(path, method='GET', body=None):
+        def request(path, method='GET', body=None, timeout=None):
             if path == '/proxies/sakura' and method == 'GET':
                 return {'type': 'Selector', 'now': region['name']}
             if path == '/proxies/sakura' and method == 'PUT':
@@ -205,6 +206,39 @@ class SelectionPoolTests(unittest.TestCase):
         self.assertEqual(result['tag'], 'us-b')
         self.assertEqual(selected, ['us-b'])
 
+    def test_japan_node_can_win_when_configured_in_pool(self):
+        selector, selected = self.selector_with(
+            {'us-a': 100, 'us-b': 200, 'sg-a': 150, 'jp-a': 130},
+            {'us-a': {'ok': True, 'throughput_kbps': 70, 'chatgpt_ok': True},
+             'us-b': {'ok': True, 'throughput_kbps': 80, 'chatgpt_ok': True},
+             'sg-a': {'ok': True, 'throughput_kbps': 90, 'chatgpt_ok': True},
+             'jp-a': {'ok': True, 'throughput_kbps': 220, 'chatgpt_ok': True}})
+        selector.selection_regions = ['美国', '新加坡', '日本']
+        result = selector.select_once()
+        self.assertEqual(result['tag'], 'jp-a')
+        self.assertEqual(result['region'], '日本')
+        self.assertEqual(selected, ['jp-a'])
+
+    def test_quality_stage_is_bounded_by_the_candidate_limit(self):
+        selector, _ = self.selector_with(
+            {'us-a': 100, 'us-b': 110, 'sg-a': 120, 'jp-a': 130},
+            {'us-a': {'ok': True, 'throughput_kbps': 70, 'chatgpt_ok': True},
+             'us-b': {'ok': True, 'throughput_kbps': 80, 'chatgpt_ok': True},
+             'sg-a': {'ok': True, 'throughput_kbps': 90, 'chatgpt_ok': True},
+             'jp-a': {'ok': True, 'throughput_kbps': 95, 'chatgpt_ok': True}})
+        selector.selection_regions = ['美国', '新加坡', '日本']
+        selector.candidate_probe_limit = 2
+        captured = {}
+
+        def measure(candidates):
+            captured['tags'] = [item['tag'] for item in candidates]
+            return [{**item, 'ok': True, 'chatgpt_ok': True,
+                     'throughput_kbps': 100} for item in candidates]
+
+        selector._measure_candidates = measure
+        selector.select_once()
+        self.assertEqual(captured['tags'], ['us-a', 'us-b'])
+
     def test_recovery_scans_same_us_singapore_pool(self):
         selector, _ = self.selector_with(
             {'us-a': 100, 'us-b': 200, 'sg-a': 150},
@@ -228,7 +262,7 @@ class SelectionPoolTests(unittest.TestCase):
         self.assertEqual(args, ())
         self.assertFalse(kwargs['apply'])
         self.assertEqual([item['tag'] for item in kwargs['candidates']],
-                         ['us-a', 'us-b'])
+                         ['us-a', 'us-b', 'sg-a'])
 
 
 class CrossRegionFallbackTests(unittest.TestCase):
@@ -315,6 +349,7 @@ class CrossRegionFallbackTests(unittest.TestCase):
 
     def test_rejected_cross_region_node_restores_both_selectors(self):
         selector, _ = self.selector_with()
+        selector._verify_live_node = Mock(return_value={'ok': True, 'entry': 'us'})
         selector.pending_switch = {
             'previous_region': '美国', 'previous_group': 'region-us', 'previous_tag': 'us',
             'switched_region': '韩国', 'switched_group': 'region-kr', 'switched_tag': 'kr',
@@ -367,7 +402,7 @@ class HealthAwareSelectionTests(unittest.TestCase):
         selected = {'tag': current}
         selector._set_group = Mock(side_effect=lambda group, tag: selected.update(tag=tag))
 
-        def request(path, method='GET', body=None):
+        def request(path, method='GET', body=None, timeout=None):
             if path == '/proxies/sakura':
                 return {'type': 'Selector', 'now': 'region-group'}
             if path == '/proxies/region-group' and method == 'GET':
@@ -454,6 +489,7 @@ class HealthAwareSelectionTests(unittest.TestCase):
             'ok': True, 'complete': True, 'throughput_kbps': 120, 'health': 'healthy'})
         selector.verify_chatgpt = Mock(return_value={
             'ok': False, 'chatgpt_ok': False, 'chatgpt_error': 'TimeoutError'})
+        selector._verify_live_node = Mock(return_value={'ok': True, 'entry': 'a'})
         selector.health_check_once()
         second = selector.health_check_once()
         self.assertEqual(second['outcome']['action'], 'restore')
@@ -510,6 +546,7 @@ class HealthAwareSelectionTests(unittest.TestCase):
             'baseline_health': 'low', 'samples': []}
         selector._small_quality = Mock(return_value={
             'ok': True, 'complete': True, 'throughput_kbps': 22, 'health': 'healthy'})
+        selector._verify_live_node = Mock(return_value={'ok': True, 'entry': 'a'})
         first = selector.health_check_once()
         second = selector.health_check_once()
         self.assertEqual(first['outcome']['action'], 'observe')
@@ -530,6 +567,260 @@ class HealthAwareSelectionTests(unittest.TestCase):
         second = selector.health_check_once()
         self.assertEqual(second['outcome']['action'], 'accept')
         selector._set_group.assert_not_called()
+
+
+class EntryRetryTests(unittest.TestCase):
+    def selector(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        (root / 'state').mkdir()
+        (root / 'state/controller-secret.txt').write_text('test-only', encoding='utf-8')
+        selector = ls.LatencySelector(root, {
+            'ControllerPort': 1, 'MixedPort': 2,
+            'SakuraMinimumThroughputKBps': 20, 'SakuraTunValidation': False})
+        return selector
+
+    def test_measure_retries_other_entries_before_rejecting_the_node(self):
+        selector = self.selector()
+        selector._entry_tags = lambda tag: ['dead', 'live']
+
+        def request(path, method='GET', body=None, timeout=None):
+            if path.startswith('/proxies/dead/'):
+                raise OSError('entry down')
+            if path.startswith('/proxies/live/'):
+                return {'delay': 120}
+            raise AssertionError((path, method, body))
+
+        selector.request = request
+        self.assertEqual(selector.measure('a'), 120)
+        self.assertNotIn('a', selector.rejected_candidates)
+        self.assertIn('dead', selector.rejected_entries)
+
+    def test_reject_node_keeps_a_node_when_one_entry_is_still_reachable(self):
+        selector = self.selector()
+        selector._verify_live_node = Mock(return_value={'ok': True, 'entry': 'live'})
+        self.assertFalse(selector._reject_node(
+            'a', 'quality sample disconnected', verify_entries=True))
+        self.assertNotIn('a', selector.rejected_candidates)
+        selector._verify_live_node = Mock(return_value={'ok': False, 'reason': 'no live entry'})
+        self.assertTrue(selector._reject_node(
+            'a', 'quality sample disconnected', verify_entries=True))
+        self.assertIn('a', selector.rejected_candidates)
+
+
+class RestoreVerificationTests(unittest.TestCase):
+    def selector(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        (root / 'state').mkdir()
+        (root / 'state/controller-secret.txt').write_text('test-only', encoding='utf-8')
+        (root / 'state/sakura-outbounds.json').write_text(json.dumps({
+            'names': {'a': 'Node A', 'b': 'Node B'},
+            'region_groups': {'Region': {'group': 'region-group', 'nodes': ['a', 'b']}},
+        }), encoding='utf-8')
+        selector = ls.LatencySelector(root, {
+            'ControllerPort': 1, 'MixedPort': 2,
+            'SakuraMinimumThroughputKBps': 20, 'SakuraTunValidation': False})
+        selector._set_group = Mock()
+        selector._set_top_region = Mock()
+        return selector
+
+    def pending(self, restore=True):
+        decision = {
+            'previous_region': 'Region', 'previous_group': 'region-group',
+            'previous_tag': 'a', 'switched_region': 'Region',
+            'switched_group': 'region-group', 'switched_tag': 'b',
+            'baseline_kbps': 0, 'baseline_health': 'disconnected', 'samples': [],
+        }
+        if restore:
+            decision['restore'] = True
+        return decision
+
+    def test_unreachable_controller_keeps_the_observation_without_rejecting(self):
+        selector = self.selector()
+        selector._verify_live_node = Mock(
+            return_value={'ok': False, 'reason': 'controller_unreachable'})
+        outcome = selector._finish_pending_switch(
+            self.pending(), {'health': 'disconnected'}, 'switched node disconnected')
+        self.assertEqual(outcome['action'], 'pending')
+        self.assertIsNotNone(selector.pending_switch)
+        selector._set_group.assert_not_called()
+        selector._set_top_region.assert_not_called()
+        self.assertNotIn('a', selector.rejected_candidates)
+
+    def test_previous_node_wins_when_it_is_still_reachable(self):
+        selector = self.selector()
+        selector._verify_live_node = Mock(side_effect=[
+            {'ok': True, 'entry': 'a'}, {'ok': False, 'reason': 'no live entry'}])
+        outcome = selector._finish_pending_switch(
+            self.pending(), {'health': 'blocked', 'chatgpt_ok': False},
+            'switched node did not restore ChatGPT service')
+        self.assertEqual(outcome['action'], 'restore')
+        selector._set_group.assert_called_once_with('region-group', 'a')
+        selector._set_top_region.assert_called_once_with('region-group')
+        self.assertIn('b', selector.rejected_candidates)
+        self.assertNotIn('a', selector.rejected_candidates)
+
+    def test_slow_but_usable_previous_node_is_not_rejected(self):
+        selector = self.selector()
+        selector._verify_live_node = Mock(side_effect=[
+            {'ok': True, 'entry': 'a'}, {'ok': False, 'reason': 'no live entry'}])
+        outcome = selector._finish_pending_switch(
+            self.pending(), {'health': 'low'}, 'no meaningful improvement')
+        self.assertEqual(outcome['action'], 'restore')
+        self.assertNotIn('b', selector.rejected_candidates)
+
+    def test_dead_previous_node_keeps_a_verified_switched_node(self):
+        selector = self.selector()
+        selector._verify_live_node = Mock(side_effect=[
+            {'ok': False, 'reason': 'no live entry'}, {'ok': True, 'entry': 'b'}])
+        outcome = selector._finish_pending_switch(
+            self.pending(), {'health': 'healthy'}, 'previous node failed')
+        self.assertEqual(outcome['action'], 'accept')
+        self.assertEqual(outcome['tag'], 'b')
+        self.assertIn('a', selector.rejected_candidates)
+        self.assertNotIn('b', selector.rejected_candidates)
+        selector._set_group.assert_not_called()
+
+    def test_two_unverified_nodes_request_immediate_recovery(self):
+        selector = self.selector()
+        selector._verify_live_node = Mock(
+            return_value={'ok': False, 'reason': 'no live entry'})
+        selector.recovery_failures = 0
+        selector.next_recovery_at = 999
+        outcome = selector._finish_pending_switch(
+            self.pending(), {'health': 'disconnected'}, 'switched node disconnected')
+        self.assertEqual(outcome['action'], 'recover')
+        self.assertTrue(outcome['needs_recovery'])
+        self.assertEqual(selector.recovery_failures, 1)
+        self.assertEqual(selector.next_recovery_at, 0)
+        self.assertIn('a', selector.rejected_candidates)
+        self.assertIn('b', selector.rejected_candidates)
+        self.assertIsNone(selector.pending_switch)
+
+    def test_health_check_runs_recovery_immediately_after_both_fail(self):
+        selector = self.selector()
+        selector.request = Mock(return_value={'type': 'Selector', 'now': 'sakura'})
+        selector._region_context = Mock(return_value=(
+            'Region', {'group': 'region-group', 'nodes': ['a', 'b']},
+            selector.state(), 'b'))
+        selector.pending_switch = self.pending()
+        selector._small_quality = Mock(return_value={
+            'ok': False, 'complete': False, 'throughput_kbps': 0,
+            'health': 'disconnected'})
+        selector._verify_live_node = Mock(
+            return_value={'ok': False, 'reason': 'no live entry'})
+        selector._recover_current = Mock(return_value={'action': 'switch', 'tag': 'c'})
+        outcome = selector.health_check_once()
+        self.assertTrue(outcome['outcome']['needs_recovery'])
+        self.assertEqual(outcome['outcome']['recovery'],
+                         {'action': 'switch', 'tag': 'c'})
+        selector._recover_current.assert_called_once()
+
+
+class SnapshotAndRestartTests(unittest.TestCase):
+    def selector(self, config=None):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        (root / 'state').mkdir()
+        (root / 'state/controller-secret.txt').write_text('test-only', encoding='utf-8')
+        (root / 'state/sakura-outbounds.json').write_text(json.dumps({
+            'names': {'a': 'Node A', 'b': 'Node B'},
+            'region_groups': {'Region': {'group': 'region-group', 'nodes': ['a', 'b']}},
+        }), encoding='utf-8')
+        if config is not None:
+            (root / 'config.json').write_text(json.dumps(config), encoding='utf-8')
+        return ls.LatencySelector(root, {
+            'ControllerPort': 1, 'MixedPort': 2,
+            'SakuraMinimumThroughputKBps': 20, 'SakuraTunValidation': False})
+
+    def test_dry_run_selection_never_writes_the_live_snapshot(self):
+        selector = self.selector()
+        selector.request = Mock(side_effect=[
+            {'type': 'Selector', 'now': 'region-group'},
+            {'now': 'a'}])
+        selector.measure = lambda tag: 100
+        selector._measure_candidates = lambda candidates: [
+            {**item, 'ok': True, 'chatgpt_ok': True, 'throughput_kbps': 100}
+            for item in candidates]
+        result = selector.select_once(apply=False)
+        self.assertIsNotNone(result)
+        self.assertFalse((selector.root / 'state/sakura-selection.json').exists())
+
+    def test_failed_scan_keeps_the_previous_shortlist(self):
+        selector = self.selector()
+        path = selector.root / 'state/sakura-selection.json'
+        path.write_text(json.dumps({
+            'candidates': [{'tag': 'b', 'score': 0.5}],
+            'candidate_tag': 'b'}), encoding='utf-8')
+        selector.request = Mock(side_effect=[
+            {'type': 'Selector', 'now': 'region-group'},
+            {'now': 'a'}])
+        selector.measure = Mock(side_effect=ValueError('all entries failed'))
+        self.assertIsNone(selector.select_once())
+        snapshot = json.loads(path.read_text(encoding='utf-8'))
+        self.assertTrue(snapshot['stale_candidates'])
+        self.assertEqual([item['tag'] for item in snapshot['candidates']], ['b'])
+        self.assertEqual(snapshot.get('candidate_tag'), 'b')
+
+    def test_quality_stage_skips_candidates_missing_from_the_generated_config(self):
+        selector = self.selector({'outbounds': [{'tag': 'a'}, {'tag': 'b'}]})
+        selector._candidate_quality = Mock(return_value={
+            'ok': True, 'chatgpt_ok': True, 'throughput_kbps': 100})
+        context = Mock()
+        context.__enter__ = Mock(return_value=SimpleNamespace(ports={'a': 1}))
+        context.__exit__ = Mock(return_value=False)
+        with patch('latency_selector.IsolatedProbePool', return_value=context) as pool:
+            result = selector._measure_candidates([{'tag': 'a'}, {'tag': 'missing'}])
+        self.assertEqual([item['tag'] for item in result], ['a'])
+        self.assertEqual(pool.call_args[0][1], ['a'])
+
+    def test_scan_budget_stops_the_quality_stage(self):
+        selector = self.selector({'outbounds': [{'tag': 'a'}, {'tag': 'b'}]})
+        selector.scan_budget_seconds = 10
+        selector._candidate_quality = Mock(return_value={
+            'ok': True, 'chatgpt_ok': True, 'throughput_kbps': 100})
+        context = Mock()
+        context.__enter__ = Mock(return_value=SimpleNamespace(ports={'a': 1, 'b': 2}))
+        context.__exit__ = Mock(return_value=False)
+        with patch('latency_selector.IsolatedProbePool', return_value=context), \
+                patch('latency_selector.time.monotonic',
+                      side_effect=[0.0, 0.0, 11.0, 12.0]):
+            result = selector._measure_candidates([{'tag': 'a'}, {'tag': 'b'}])
+        self.assertEqual([item['tag'] for item in result], ['a'])
+
+    def test_legacy_rejection_ttl_is_clamped_to_the_configured_window(self):
+        selector = self.selector()
+        now = ls.time.time()
+        (selector.root / 'state/sakura-health.json').write_text(json.dumps({
+            'rejected_candidates': {'a': now + 86400}}), encoding='utf-8')
+        reloaded = ls.LatencySelector(selector.root, {
+            'ControllerPort': 1, 'MixedPort': 2, 'SakuraRejectionSeconds': 300})
+        self.assertLessEqual(reloaded.rejected_candidates['a'], now + 300 + 5)
+        self.assertGreater(reloaded.rejected_candidates['a'], now)
+
+    def test_initial_refresh_resumes_pending_observation_then_scans(self):
+        selector = self.selector()
+        selector.pending_switch = {'previous_tag': 'a', 'switched_tag': 'b'}
+        selector.health_check_once = Mock(return_value={'outcome': {'action': 'observe'}})
+        selector.select_once = Mock(return_value={'tag': 'b'})
+        selector.stop.wait = Mock(return_value=False)
+        self.assertEqual(selector._initial_refresh(), {'tag': 'b'})
+        selector.health_check_once.assert_called_once_with()
+        selector.stop.wait.assert_called_once_with(30)
+        selector.select_once.assert_called_once_with()
+
+    def test_initial_refresh_without_pending_switch_scans_immediately(self):
+        selector = self.selector()
+        selector.health_check_once = Mock()
+        selector.select_once = Mock(return_value={'tag': 'a'})
+        selector.stop.wait = Mock()
+        self.assertEqual(selector._initial_refresh(), {'tag': 'a'})
+        selector.health_check_once.assert_not_called()
+        selector.stop.wait.assert_not_called()
 
 
 if __name__ == '__main__':

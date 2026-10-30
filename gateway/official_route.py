@@ -370,9 +370,12 @@ class OfficialRouteManager:
         """
         if not self.enabled:
             return
-        effective_tag = tag or (self._active or {}).get('tag')
+        lane_is_official = not lane or lane == self.selector
+        effective_tag = tag or ((self._active or {}).get('tag')
+                                if lane_is_official else None)
         large_upload = bool(request_bytes and request_bytes >= LARGE_OFFICIAL_UPLOAD_BYTES)
-        connect_failed = failure_stage == 'connect' and connect_attempts >= 4
+        connect_failed = (failure_stage == 'connect' and connect_attempts >= 4
+                          and lane_is_official)
         with self._lock:
             was_degraded = self._degraded
             self._last_request = {
@@ -399,6 +402,11 @@ class OfficialRouteManager:
                 self._scan_now.set()
                 self._last_request['degraded_reason'] = 'all official connect attempts failed'
             elif lane and lane != self.selector:
+                # A fallback lane says nothing about the dedicated selector.
+                # A failed connect still asks for a fresh comparison, but it
+                # must not blame the official node or degrade the lane.
+                if failure_stage == 'connect':
+                    self._scan_now.set()
                 return
             elif large_upload and (upload_timed_out or failure_stage == 'send'):
                 # The body is too large for the available link. Keep serving

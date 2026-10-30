@@ -15,6 +15,20 @@ import time
 PROBE_LOCK = threading.RLock()
 
 
+def configured_tags(root):
+    """Return the outbound tags present in the current generated config."""
+    try:
+        source = json.loads((Path(root) / 'config.json').read_text(encoding='utf-8-sig'))
+    except (OSError, ValueError, TypeError):
+        return set()
+    if not isinstance(source, dict):
+        return set()
+    return {
+        item['tag'] for item in source.get('outbounds', [])
+        if isinstance(item, dict) and isinstance(item.get('tag'), str)
+    }
+
+
 def probe_config(source, ports):
     by_tag = {item['tag']: item for item in source['outbounds']}
     required = {'direct', *ports}

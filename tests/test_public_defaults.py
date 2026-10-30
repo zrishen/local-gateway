@@ -27,6 +27,16 @@ class PublicDefaultsTests(unittest.TestCase):
         self.assertEqual(settings['CodexAnthropicBridgeMaxBodyBytes'], 33554432)
         self.assertEqual(settings['CodexAnthropicBridgeClientVersion'], '')
 
+    def test_selection_and_recovery_defaults(self):
+        settings = json.loads((ROOT/'settings.json').read_text(encoding='utf-8-sig'))
+        self.assertEqual(settings['SakuraSelectionRegions'], ['美国', '新加坡', '日本'])
+        self.assertEqual(settings['SakuraRejectionSeconds'], 300)
+        self.assertEqual(settings['SakuraEndpointReloadStaleRequestSeconds'], 600)
+        self.assertEqual(settings['SakuraEndpointReloadRecoveryFailures'], 2)
+        self.assertEqual(settings['SakuraCandidateProbeLimit'], 20)
+        self.assertEqual(settings['SakuraScanBudgetSeconds'], 180)
+        self.assertEqual(settings['SakuraRestoreVerifySeconds'], 15)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -62,5 +62,9 @@ if ($top) { $top.default = $match.Group }
 [IO.File]::WriteAllText($outboundsFile, ($data | ConvertTo-Json -Depth 20) + "`n", [Text.UTF8Encoding]::new($false))
 
 Write-Output ("Active region set to {0} ({1} nodes)." -f $match.Region, $match.Nodes)
+$pool = @($Settings.SakuraSelectionRegions | Where-Object { $_ })
+if ($pool.Count -gt 1) {
+    Write-Warning ("Automatic selection is active across {0}; this manual region is a temporary override and the selector may move back to another pool region." -f ($pool -join ', '))
+}
 & $Settings.PythonPath -B (Join-Path $Root 'gateway\latency_selector.py') --once
 if ($LASTEXITCODE -ne 0) { Write-Warning 'Region switched, but the latency probe did not find a verified node yet.' }
