@@ -19,6 +19,14 @@ class PublicDefaultsTests(unittest.TestCase):
         value = json.loads((ROOT/'gateway/upstream-dns-overrides.json').read_text(encoding='utf-8'))
         self.assertEqual(value, {})
 
+    def test_official_anthropic_bridge_defaults(self):
+        settings = json.loads((ROOT/'settings.json').read_text(encoding='utf-8-sig'))
+        self.assertTrue(settings['CodexAnthropicBridgeEnabled'])
+        self.assertEqual(settings['CodexAnthropicOfficialModels'],
+                         ['openai/gpt-6.1-sol'])
+        self.assertEqual(settings['CodexAnthropicBridgeMaxBodyBytes'], 33554432)
+        self.assertEqual(settings['CodexAnthropicBridgeClientVersion'], '')
+
 
 if __name__ == '__main__':
     unittest.main()

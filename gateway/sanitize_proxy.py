@@ -471,6 +471,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 _d = None
             if isinstance(_d, dict) and is_google_model(map_model(_d.get("model") or "")[0]):
                 return self._bridge_responses(_d)
+        # Claude Code 的官方 Codex 模型：/v1/messages -> 官方 Responses。
+        # 只有 CodexAnthropicOfficialModels 中的模型会进入桥接，其他模型保持原逻辑。
+        _path = self.path.split("?")[0].rstrip("/")
+        if _path in ("/v1/messages", "/v1/messages/count_tokens"):
+            import anthropic_codex_bridge as bridge
+            try:
+                _d, _official = bridge.inspect_request(body, self.headers, PROJECT_SETTINGS)
+            except bridge.BridgeError as error:
+                return bridge.send_error(self, error)
+            if _official:
+                if _path == "/v1/messages/count_tokens":
+                    return bridge.handle_count_tokens(self, _d, PROJECT_SETTINGS)
+                return bridge.handle_messages(self, _d, PROJECT_SETTINGS)
         new_body, info = process_body(body)
         STATS["requests"] += 1
         if info:

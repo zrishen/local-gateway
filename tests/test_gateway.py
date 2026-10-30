@@ -85,14 +85,18 @@ class GatewayTests(unittest.TestCase):
             server.server_close()
 
     def request(self, method, path, data=None):
+        status, body = self.request_status(method, path, data)
+        self.assertEqual(status, 200)
+        return body
+
+    def request_status(self, method, path, data=None):
         client = http.client.HTTPConnection('127.0.0.1',self.port,timeout=5)
         client.request(method,path,body=json.dumps(data).encode() if data is not None else None,
                        headers={'Authorization':'Bearer test-local-only','Content-Type':'application/json'})
         response=client.getresponse()
         body=response.read()
         client.close()
-        self.assertEqual(response.status,200)
-        return body
+        return response.status, body
 
     def test_api_auth_and_path_preserved(self):
         result=json.loads(self.request('GET','/v1/models?x=1'))
@@ -119,6 +123,52 @@ class GatewayTests(unittest.TestCase):
         body=self.request('POST','/v1/responses',{'model':'google/gemini-3.8-flash','input':'test','stream':True})
         self.assertIn(b'response.output_text.delta',body)
         self.assertIn(b'response.completed',body)
+
+    def test_official_anthropic_model_dispatches_to_bridge(self):
+        import anthropic_codex_bridge as bridge
+        calls = {}
+
+        def fake_bridge(handler, data, settings):
+            calls['data'] = data
+            body = json.dumps({'bridged': data['model']}).encode()
+            handler.send_response(200)
+            handler.send_header('Content-Type', 'application/json')
+            handler.send_header('Content-Length', str(len(body)))
+            handler.send_header('Connection', 'close')
+            handler.end_headers()
+            handler.wfile.write(body)
+            return True
+
+        with patch.object(bridge, 'handle_messages', side_effect=fake_bridge):
+            status, body = self.request_status('POST', '/v1/messages', {
+                'model': 'openai/gpt-6.1-sol',
+                'messages': [{'role': 'user', 'content': 'hi'}]})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {'bridged': 'openai/gpt-6.1-sol'})
+        self.assertEqual(calls['data']['messages'][0]['content'], 'hi')
+
+    def test_third_party_anthropic_model_keeps_upstream_path(self):
+        result = json.loads(self.request('POST', '/v1/messages', {
+            'model': 'openai/gpt-6-luna',
+            'messages': [{'role': 'user', 'content': 'hi'}]}))
+        self.assertEqual(result['model'], 'openai/gpt-6-luna')
+
+    def test_official_count_tokens_is_answered_locally(self):
+        status, body = self.request_status('POST', '/v1/messages/count_tokens', {
+            'model': 'openai/gpt-6.1-sol',
+            'messages': [{'role': 'user', 'content': 'hello world'}]})
+        self.assertEqual(status, 200)
+        self.assertGreater(json.loads(body)['input_tokens'], 0)
+
+    def test_official_bridge_can_be_disabled(self):
+        settings = dict(sanitize_proxy.PROJECT_SETTINGS,
+                        CodexAnthropicBridgeEnabled=False)
+        with patch.object(sanitize_proxy, 'PROJECT_SETTINGS', settings):
+            status, body = self.request_status('POST', '/v1/messages', {
+                'model': 'openai/gpt-6.1-sol',
+                'messages': [{'role': 'user', 'content': 'hi'}]})
+        self.assertEqual(status, 503)
+        self.assertEqual(json.loads(body)['error']['type'], 'api_error')
 
     def test_http_forward_proxy_absolute_target_preserved(self):
         self.assertEqual(self.request('GET','http://example.test/a?b=2'),b'GET http://example.test/a?b=2 HTTP/1.1')

@@ -54,6 +54,12 @@
   "CodexOfficialUploadMinimumKBps": 8,
   "CodexOfficialHeadersTimeoutSeconds": 360,
   "CodexOfficialStreamIdleSeconds": 180,
+  "CodexAnthropicBridgeEnabled": true,
+  "CodexAnthropicOfficialModels": [
+    "openai/gpt-6.1-sol"
+  ],
+  "CodexAnthropicBridgeMaxBodyBytes": 33554432,
+  "CodexAnthropicBridgeClientVersion": "",
   "CodexRequestCompression": true,
   "CodexCompressionLevel": 3,
   "AiUpstreamConnectTimeoutSeconds": 12,
