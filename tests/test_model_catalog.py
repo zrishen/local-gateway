@@ -34,15 +34,15 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertEqual(self.levels('google/gemini-3.8-flash'),
                          ['low', 'medium', 'high', 'xhigh', 'max'])
 
-    def test_third_party_models_use_475k_effective_context(self):
+    def test_third_party_models_use_285k_effective_context(self):
         for slug, model in self.models.items():
             with self.subTest(model=slug):
-                self.assertEqual(model['context_window'], 500000)
-                self.assertEqual(model['max_context_window'], 500000)
+                self.assertEqual(model['context_window'], 300000)
+                self.assertEqual(model['max_context_window'], 300000)
                 self.assertEqual(model['effective_context_window_percent'], 95)
                 self.assertEqual(
                     model['context_window'] * model['effective_context_window_percent'] // 100,
-                    475000)
+                    285000)
 
     def test_local_catalog_contains_only_namespaced_third_party_models(self):
         self.assertTrue(self.models)
