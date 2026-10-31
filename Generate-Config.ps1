@@ -62,26 +62,63 @@ if ($companyConfigured) {
 $routeRules += @{rule_set=@('geosite-cn','geoip-cn'); action='route'; outbound='direct'}
 $embeddedUpstream = $null
 $upstreamFile = Join-Path $StateDir 'sakura-outbounds.json'
-if (Test-Path -LiteralPath $upstreamFile) {
+$subscriptionPresent = Test-Path -LiteralPath $upstreamFile
+if ($subscriptionPresent) {
+    $candidate = $null
+    $candidateValid = $false
     try {
         $candidate = Get-Content -LiteralPath $upstreamFile -Raw -Encoding UTF8 | ConvertFrom-Json
         $candidateOutbounds = @($candidate.outbounds)
         $hasGroup = @($candidateOutbounds | Where-Object { $_.tag -eq 'sakura' }).Count -gt 0
-        if ($candidateOutbounds.Count -ge 2 -and $hasGroup) {
-            $runtimeFile = Join-Path $StateDir 'sakura-outbounds.runtime.json'
-            $endpointArgs = @('-B', (Join-Path $Root 'gateway\endpoint_catalog.py'),
-                              '--input', $upstreamFile, '--output', $runtimeFile,
-                              '--settings', (Join-Path $Root 'settings.json'))
-            & $Settings.PythonPath @endpointArgs | Out-Null
-            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $runtimeFile)) {
-                throw 'Endpoint candidate rendering failed.'
-            }
+        $candidateValid = $candidateOutbounds.Count -ge 2 -and $hasGroup
+    } catch {
+        $candidateValid = $false
+    }
+    if (-not $candidateValid) {
+        # A subscription file is authoritative. Do not replace a working full
+        # config with the SakuraCat-only fallback because the file is corrupt.
+        throw 'Sakura subscription is present but invalid; keeping config.json untouched.'
+    }
+
+    $runtimeFile = Join-Path $StateDir 'sakura-outbounds.runtime.json'
+    $rendered = $false
+    try {
+        $endpointArgs = @('-B', (Join-Path $Root 'gateway\endpoint_catalog.py'),
+                          '--input', $upstreamFile, '--output', $runtimeFile,
+                          '--settings', (Join-Path $Root 'settings.json'))
+        & $Settings.PythonPath @endpointArgs | Out-Null
+        if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $runtimeFile)) {
             $candidate = Get-Content -LiteralPath $runtimeFile -Raw -Encoding UTF8 | ConvertFrom-Json
-            $embeddedUpstream = $candidate
+            $renderedOutbounds = @($candidate.outbounds)
+            $renderedGroup = @($renderedOutbounds | Where-Object { $_.tag -eq 'sakura' }).Count -gt 0
+            $rendered = $renderedOutbounds.Count -ge 2 -and $renderedGroup
         }
     } catch {
-        $embeddedUpstream = $null
+        $rendered = $false
     }
+
+    if (-not $rendered) {
+        # Endpoint probing is network-dependent and can fail during boot or a
+        # brief DNS outage. Reuse the last good rendered outbounds instead of
+        # silently downgrading to SakuraCat; if neither is usable, fail the
+        # generation and leave the live config untouched.
+        try {
+            $cached = Get-Content -LiteralPath $runtimeFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            $cachedOutbounds = @($cached.outbounds)
+            $cachedGroup = @($cachedOutbounds | Where-Object { $_.tag -eq 'sakura' }).Count -gt 0
+            if ($cachedOutbounds.Count -ge 2 -and $cachedGroup) {
+                $candidate = $cached
+                $rendered = $true
+                Write-Warning 'Endpoint rendering failed; using cached runtime outbounds.'
+            }
+        } catch {
+            $rendered = $false
+        }
+    }
+    if (-not $rendered) {
+        throw 'Endpoint candidate rendering failed with no usable cached runtime; keeping config.json untouched.'
+    }
+    $embeddedUpstream = $candidate
 }
 if ($embeddedUpstream) {
     # A node connection must leave on the real adapter. Otherwise Windows can
@@ -93,6 +130,7 @@ if ($embeddedUpstream) {
         $outbounds += $outbound
     }
 } else {
+    # No subscription file: SakuraCat is the only configured upstream.
     $outbounds += @{type='socks'; tag='sakura'; server=$Settings.SakuraHost; server_port=[int]$Settings.SakuraPort; version='5'}
 }
 $officialEnabled = $false
