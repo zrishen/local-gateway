@@ -4,7 +4,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'gateway'))
 import official_route as oroute
@@ -120,6 +120,56 @@ class OfficialRouteTests(unittest.TestCase):
         manager.record_request(failure_stage=None)
         state = json.loads((root / 'state/codex-official-route.json').read_text())
         self.assertTrue(state['ready'])
+
+    def test_failover_only_low_health_does_not_request_a_scan(self):
+        root = self.temp_root()
+        controller = FakeController(['a'])
+        manager = self.manager(root, controller, {'a': self.good(90, 150)},
+                               SakuraFailoverOnly=True)
+        manager.select_once()
+        manager.probe_members = lambda members: [
+            {**members[0], **self.good(10, 15)}]
+        self.assertFalse(manager.health_check())
+        self.assertFalse(manager.health_check())
+        self.assertFalse(manager._scan_now.is_set())
+
+    def test_failover_only_still_scans_when_chatgpt_is_blocked(self):
+        root = self.temp_root()
+        controller = FakeController(['a'])
+        manager = self.manager(root, controller, {'a': self.good(90, 150)},
+                               SakuraFailoverOnly=True)
+        manager.select_once()
+        blocked = {**self.good(90, 150), 'chatgpt_ok': False}
+        manager.probe_members = lambda members: [{**members[0], **blocked}]
+        self.assertFalse(manager.health_check())
+        self.assertFalse(manager.health_check())
+        self.assertTrue(manager._scan_now.is_set())
+
+    def test_failover_only_run_skips_periodic_scans(self):
+        root = self.temp_root()
+        manager = self.manager(root, FakeController(['a']), {'a': self.good()},
+                               SakuraFailoverOnly=True)
+        manager._active = {'tag': 'a'}
+        manager.select_once = Mock(return_value={'tag': 'a'})
+        manager.health_check = Mock()
+
+        class Stop:
+            def __init__(self):
+                self.waits = 0
+
+            def is_set(self):
+                return self.waits >= 3
+
+            def wait(self, seconds):
+                self.waits += 1
+                return self.is_set()
+
+        manager._stop = Stop()
+        with patch.object(oroute.time, 'monotonic',
+                          side_effect=[0.0, 0.0, 0.0, 7200.0, 7200.0]):
+            manager.run()
+        manager.select_once.assert_called_once_with()
+        manager.health_check.assert_called_once_with()
 
     def test_fast_failover_uses_the_cached_alternative(self):
         root = self.temp_root()

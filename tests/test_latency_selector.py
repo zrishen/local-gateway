@@ -384,7 +384,7 @@ class CrossRegionFallbackTests(unittest.TestCase):
 
 
 class HealthAwareSelectionTests(unittest.TestCase):
-    def selector_with(self, current='a'):
+    def selector_with(self, current='a', failover_only=False):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -398,6 +398,7 @@ class HealthAwareSelectionTests(unittest.TestCase):
             'ControllerPort': 1, 'MixedPort': 2,
             'SakuraMinimumThroughputKBps': 20,
             'SakuraTunValidation': False,
+            'SakuraFailoverOnly': failover_only,
         })
         selected = {'tag': current}
         selector._set_group = Mock(side_effect=lambda group, tag: selected.update(tag=tag))
@@ -452,6 +453,47 @@ class HealthAwareSelectionTests(unittest.TestCase):
         self.assertEqual(first['failure_count'], 1)
         self.assertEqual(second['failure_count'], 0)
         self.assertEqual(selector._recover_current.call_count, 1)
+
+    def test_failover_only_keeps_a_low_connected_route(self):
+        selector, _ = self.selector_with(failover_only=True)
+        selector._small_quality = Mock(return_value={
+            'ok': True, 'complete': True, 'throughput_kbps': 12, 'health': 'low'})
+        selector._recover_current = Mock()
+        first = selector.health_check_once()
+        second = selector.health_check_once()
+        self.assertEqual(first['failure_count'], 0)
+        self.assertEqual(second['failure_count'], 0)
+        self.assertIsNone(first['outcome'])
+        self.assertIsNone(second['outcome'])
+        selector._recover_current.assert_not_called()
+
+    def test_failover_only_still_recovers_when_chatgpt_is_blocked(self):
+        selector, _ = self.selector_with(failover_only=True)
+        selector._small_quality = Mock(return_value={
+            'ok': True, 'complete': True, 'throughput_kbps': 80, 'health': 'healthy'})
+        selector.verify_chatgpt = Mock(return_value={
+            'ok': False, 'chatgpt_ok': False, 'chatgpt_error': 'TimeoutError'})
+        selector._recover_current = Mock(return_value={'action': 'switch'})
+        first = selector.health_check_once()
+        second = selector.health_check_once()
+        self.assertEqual(first['failure_count'], 1)
+        self.assertEqual(second['failure_count'], 2)
+        selector._recover_current.assert_called_once()
+
+    def test_failover_only_full_scans_after_targeted_recovery_fails(self):
+        selector, _ = self.selector_with(failover_only=True)
+        selector._small_quality = Mock(return_value={
+            'ok': True, 'complete': True, 'throughput_kbps': 80, 'health': 'healthy'})
+        selector.verify_chatgpt = Mock(return_value={
+            'ok': False, 'chatgpt_ok': False, 'chatgpt_error': 'TimeoutError'})
+        selector._recover_current = Mock(return_value={
+            'action': 'keep', 'reason': 'no targeted candidate passed'})
+        selector.select_once = Mock(return_value={'tag': 'b'})
+        selector.health_check_once()
+        outcome = selector.health_check_once()
+        selector.select_once.assert_called_once_with()
+        self.assertEqual(outcome['outcome']['action'], 'switch')
+        self.assertEqual(outcome['outcome']['reason'], 'full pool recovery')
 
     def test_disconnected_current_triggers_recovery_immediately(self):
         selector, _ = self.selector_with()
@@ -721,7 +763,7 @@ class RestoreVerificationTests(unittest.TestCase):
 
 
 class SnapshotAndRestartTests(unittest.TestCase):
-    def selector(self, config=None):
+    def selector(self, config=None, failover_only=False):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -735,7 +777,8 @@ class SnapshotAndRestartTests(unittest.TestCase):
             (root / 'config.json').write_text(json.dumps(config), encoding='utf-8')
         return ls.LatencySelector(root, {
             'ControllerPort': 1, 'MixedPort': 2,
-            'SakuraMinimumThroughputKBps': 20, 'SakuraTunValidation': False})
+            'SakuraMinimumThroughputKBps': 20, 'SakuraTunValidation': False,
+            'SakuraFailoverOnly': failover_only})
 
     def test_dry_run_selection_never_writes_the_live_snapshot(self):
         selector = self.selector()
@@ -821,6 +864,87 @@ class SnapshotAndRestartTests(unittest.TestCase):
         self.assertEqual(selector._initial_refresh(), {'tag': 'a'})
         selector.health_check_once.assert_not_called()
         selector.stop.wait.assert_not_called()
+
+    def test_failover_only_initial_refresh_keeps_a_working_route(self):
+        selector = self.selector(failover_only=True)
+        result = {'current': {'health': 'low'}, 'outcome': None}
+        selector.health_check_once = Mock(return_value=result)
+        selector.select_once = Mock()
+        self.assertEqual(selector._initial_refresh(), result)
+        selector.health_check_once.assert_called_once_with()
+        selector.select_once.assert_not_called()
+
+    def test_failover_only_initial_refresh_scans_when_recovery_kept_a_bad_route(self):
+        selector = self.selector(failover_only=True)
+        selector.health_check_once = Mock(return_value={
+            'current': {'health': 'disconnected'},
+            'outcome': {'action': 'keep'}})
+        selector.select_once = Mock(return_value={'tag': 'b'})
+        self.assertEqual(selector._initial_refresh(), {'tag': 'b'})
+        selector.select_once.assert_called_once_with()
+
+    def test_failover_only_initial_refresh_scans_on_first_blocked_sample(self):
+        selector = self.selector(failover_only=True)
+        selector.health_check_once = Mock(return_value={
+            'current': {'health': 'blocked'}, 'outcome': None})
+        selector.select_once = Mock(return_value={'tag': 'b'})
+        self.assertEqual(selector._initial_refresh(), {'tag': 'b'})
+        selector.select_once.assert_called_once_with()
+
+    def test_failover_only_resumes_pending_without_a_full_scan(self):
+        selector = self.selector(failover_only=True)
+        selector.pending_switch = {'previous_tag': 'a', 'switched_tag': 'b'}
+        result = {'outcome': {'action': 'observe'}}
+        selector.health_check_once = Mock(return_value=result)
+        selector.select_once = Mock()
+        selector.stop.wait = Mock(return_value=False)
+        self.assertEqual(selector._initial_refresh(), result)
+        self.assertEqual(selector.health_check_once.call_count, 2)
+        selector.select_once.assert_not_called()
+
+    def test_failover_only_skips_periodic_full_scans(self):
+        selector = self.selector(failover_only=True)
+        selector._initial_refresh = Mock(return_value={'current': {'health': 'healthy'}})
+        selector.select_once = Mock()
+        selector.health_check_once = Mock()
+        waits = []
+
+        class Stop:
+            def is_set(self):
+                return len(waits) >= 3
+
+            def wait(self, seconds):
+                waits.append(seconds)
+                return self.is_set()
+
+        selector.stop = Stop()
+        with patch.object(ls.time, 'monotonic', side_effect=[0.0, 0.0, 7200.0, 7200.0]):
+            selector.run()
+        selector.select_once.assert_not_called()
+        selector._initial_refresh.assert_called_once_with()
+        selector.health_check_once.assert_called_once_with()
+        self.assertEqual(waits, [30, 30, 30])
+
+    def test_periodic_full_scans_still_run_without_failover_only(self):
+        selector = self.selector()
+        selector._initial_refresh = Mock(return_value={'tag': 'a'})
+        selector.select_once = Mock(return_value={'tag': 'a'})
+        selector.health_check_once = Mock()
+        selector._try_preferred_region = Mock(return_value=None)
+        waits = []
+
+        class Stop:
+            def is_set(self):
+                return len(waits) >= 2
+
+            def wait(self, seconds):
+                waits.append(seconds)
+                return self.is_set()
+
+        selector.stop = Stop()
+        with patch.object(ls.time, 'monotonic', side_effect=[0.0, 0.0, 7200.0, 7200.0]):
+            selector.run()
+        selector.select_once.assert_called_once_with()
 
 
 if __name__ == '__main__':

@@ -23,6 +23,7 @@
     "日本"
   ],
   "SakuraCrossRegionFallback": true,
+  "SakuraFailoverOnly": true,
   "SakuraFallbackRegions": [
     "新加坡"
   ],

@@ -30,6 +30,7 @@ class PublicDefaultsTests(unittest.TestCase):
     def test_selection_and_recovery_defaults(self):
         settings = json.loads((ROOT/'settings.json').read_text(encoding='utf-8-sig'))
         self.assertEqual(settings['SakuraSelectionRegions'], ['美国', '新加坡', '日本'])
+        self.assertTrue(settings['SakuraFailoverOnly'])
         self.assertEqual(settings['SakuraRejectionSeconds'], 300)
         self.assertEqual(settings['SakuraEndpointReloadStaleRequestSeconds'], 600)
         self.assertEqual(settings['SakuraEndpointReloadRecoveryFailures'], 2)

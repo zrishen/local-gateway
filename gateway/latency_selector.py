@@ -111,6 +111,10 @@ class LatencySelector:
             str(value).strip() for value in configured_regions
             if isinstance(configured_regions, (list, tuple)) and str(value).strip()))
         self.cross_region_fallback = bool(settings.get('SakuraCrossRegionFallback', True))
+        # Failover-only keeps a working route regardless of its measured speed.
+        # It disables periodic speed optimization and low-score switching, but
+        # still replaces a route that is disconnected or cannot reach ChatGPT.
+        self.failover_only = bool(settings.get('SakuraFailoverOnly', False))
         configured_fallbacks = settings.get('SakuraFallbackRegions') or []
         self.fallback_regions = ({str(value) for value in configured_fallbacks}
                                  if isinstance(configured_fallbacks, (list, tuple)) else set())
@@ -1440,17 +1444,41 @@ class LatencySelector:
                 outcome = {'action': 'backoff', 'tag': current,
                            'next_recovery_at': self.next_recovery_at}
         elif result['health'] in ('low', 'blocked'):
-            self.health_failures += 1
-            logging.info('Sakura health: %s %s (effective %s KB/s, body %s KB/s, ChatGPT=%s), %d/%d',
-                         current, result['health'], measured_throughput_kbps(result),
-                         result.get('throughput_kbps', 0), result.get('chatgpt_ok', False),
-                         self.health_failures, HEALTH_FAILURE_LIMIT)
-            if self.health_failures >= HEALTH_FAILURE_LIMIT:
-                if self._recovery_due():
-                    outcome = self._recover_current(region, info, data, current, result)
-                else:
-                    outcome = {'action': 'backoff', 'tag': current,
-                               'next_recovery_at': self.next_recovery_at}
+            if result['health'] == 'low' and self.failover_only:
+                # A slow but connected route is not an outage. Keep it and let
+                # the user decide whether a manual speed scan is worthwhile.
+                self.health_failures = 0
+                self._note_recovery_success()
+                logging.info(
+                    'Sakura health: %s low (effective %s KB/s, body %s KB/s, '
+                    'ChatGPT=%s); keeping route (failover-only)',
+                    current, measured_throughput_kbps(result),
+                    result.get('throughput_kbps', 0), result.get('chatgpt_ok', False))
+            else:
+                self.health_failures += 1
+                logging.info('Sakura health: %s %s (effective %s KB/s, body %s KB/s, ChatGPT=%s), %d/%d',
+                             current, result['health'], measured_throughput_kbps(result),
+                             result.get('throughput_kbps', 0), result.get('chatgpt_ok', False),
+                             self.health_failures, HEALTH_FAILURE_LIMIT)
+                if self.health_failures >= HEALTH_FAILURE_LIMIT:
+                    if self._recovery_due():
+                        outcome = self._recover_current(region, info, data, current, result)
+                        if (self.failover_only
+                                and result.get('health') in ('disconnected', 'blocked')
+                                and outcome.get('action') == 'keep'
+                                and outcome.get('reason') == 'no targeted candidate passed'):
+                            # The shortlist can go stale while the current node
+                            # stays unusable. A bounded full-pool scan is an
+                            # availability action, not periodic optimization.
+                            logging.info('Sakura health: targeted recovery exhausted; '
+                                         'trying a full pool scan')
+                            scanned = self.select_once()
+                            if scanned:
+                                outcome = {'action': 'switch', **scanned,
+                                           'reason': 'full pool recovery'}
+                    else:
+                        outcome = {'action': 'backoff', 'tag': current,
+                                   'next_recovery_at': self.next_recovery_at}
         else:
             self.health_failures = 0
             self._note_recovery_success()
@@ -1480,15 +1508,32 @@ class LatencySelector:
 
         Clearing a pending switch on every restart silently discards the
         two-round check and can leave the route on an unverified node. Observe
-        it once, then run the normal full scan from the resulting state.
+        it once, then continue from the resulting state. In failover-only mode
+        a working route is kept; a full scan is used only when the health check
+        shows that the current route is unavailable.
         """
-        if not self.pending_switch:
+        if self.pending_switch:
+            logging.info('Sakura selector: resuming pending switch observation after restart')
+            self.health_check_once()
+            if self.stop.wait(30):
+                return None
+            if not self.failover_only:
+                return self.select_once()
+            return self.health_check_once()
+
+        if not self.failover_only:
             return self.select_once()
-        logging.info('Sakura selector: resuming pending switch observation after restart')
-        self.health_check_once()
-        if self.stop.wait(30):
-            return None
-        return self.select_once()
+
+        result = self.health_check_once()
+        current = (result or {}).get('current') or {}
+        outcome = (result or {}).get('outcome') or {}
+        if (current.get('health') in ('disconnected', 'blocked')
+                and outcome.get('action') not in ('switch', 'recover', 'observe', 'pending')):
+            # Targeted recovery could not find a usable node (or the first
+            # blocked sample did not request one yet). A bounded full scan is
+            # an availability action here, not a periodic optimization.
+            return self.select_once()
+        return result
 
     def run(self):
         last_full = None
@@ -1497,10 +1542,11 @@ class LatencySelector:
             now = time.monotonic()
             try:
                 if last_full is None:
-                    self._initial_refresh()
+                    result = self._initial_refresh()
                     last_full = time.monotonic()
-                    last_health = last_full
-                elif (not self.pending_switch and now - last_full >= self.interval):
+                    last_health = last_full if result is not None else 0.0
+                elif (not self.failover_only and not self.pending_switch
+                      and now - last_full >= self.interval):
                     transition = None
                     if not self.selection_regions:
                         transition = self._try_preferred_region()

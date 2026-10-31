@@ -188,6 +188,9 @@ class OfficialRouteManager:
         self.port = int(self.settings.get('CodexOfficialPort') or DEFAULT_PORT)
         self.enabled = bool(self.settings.get('CodexOfficialEnabled', True))
         self.policy = route_policy.policy_from_settings(self.settings)
+        # Failover-only disables periodic speed comparisons for the dedicated
+        # lane. It still scans at startup and after real failures.
+        self.failover_only = bool(self.settings.get('SakuraFailoverOnly', False))
         self.scan_interval = max(300, int(float(
             self.settings.get('CodexOfficialScanMinutes', 30)) * 60))
         self.health_interval = max(60, int(float(
@@ -207,7 +210,7 @@ class OfficialRouteManager:
         self._ranked = []
         self._active = None
         self._last_switch = 0.0
-        self._last_scan = 0.0
+        self._last_scan = None
         self._last_health = 0.0
         self._next_scan = 0.0
         self._degraded = False
@@ -570,13 +573,16 @@ class OfficialRouteManager:
                     self._scan_now.set()
             elif health == 'low':
                 # A low probe score under concurrent real traffic is not a
-                # reason to take the lane out of service. Compare candidates
-                # on the next scan without interrupting working requests.
+                # reason to take the lane out of service. In failover-only
+                # mode a working route stays until it is actually unusable.
                 self._consecutive_failures = 0
-                self._low_streak += 1
-                if self._low_streak >= 2:
+                if self.failover_only:
                     self._low_streak = 0
-                    self._scan_now.set()
+                else:
+                    self._low_streak += 1
+                    if self._low_streak >= 2:
+                        self._low_streak = 0
+                        self._scan_now.set()
             else:
                 self._consecutive_failures = 0
                 self._low_streak = 0
@@ -609,14 +615,29 @@ class OfficialRouteManager:
                     selected = self.select_once()
                     # The controller and selector can still be starting during
                     # a service restart. Retry soon instead of waiting a full
-                    # scan interval before the lane becomes usable.
-                    self._last_scan = (time.monotonic() if selected
-                                       else time.monotonic() - self.scan_interval + 30)
+                    # scan interval before the lane becomes usable. In
+                    # failover-only mode, retry only when there is no active
+                    # route; otherwise wait for the health check or a real
+                    # request failure to request another scan.
+                    if selected:
+                        self._last_scan = time.monotonic()
+                    elif self.failover_only:
+                        self._last_scan = time.monotonic()
+                    else:
+                        self._last_scan = time.monotonic() - self.scan_interval + 30
                     self._last_health = time.monotonic()
-                elif not self._last_scan or now - self._last_scan >= self.scan_interval:
+                elif (self._last_scan is None
+                      or (not self.failover_only
+                          and now - self._last_scan >= self.scan_interval)
+                      or (self.failover_only and self._active is None
+                          and now - self._last_scan >= 30)):
                     selected = self.select_once()
-                    self._last_scan = (time.monotonic() if selected
-                                       else time.monotonic() - self.scan_interval + 30)
+                    if selected:
+                        self._last_scan = time.monotonic()
+                    elif self.failover_only:
+                        self._last_scan = time.monotonic()
+                    else:
+                        self._last_scan = time.monotonic() - self.scan_interval + 30
                     self._last_health = time.monotonic()
                 elif now - self._last_health >= self.health_interval:
                     self.health_check()

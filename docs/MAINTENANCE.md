@@ -66,7 +66,7 @@
 
 订阅更新后旧节点会被清理，不会无限积累。
 
-当前节点每 5 分钟通过本地混合代理下载 64 KiB 健康样本，并访问 ChatGPT 验证同一出口。默认有效吞吐下限 15 KB/s、正文下限 30 KB/s，并计算 0–1 分数；低分或 ChatGPT 不可达连续出现两次，或者连接、读取中断时，只比较当前节点和上次完整测速的前三名（并额外纳入池内其他地区各两个），按 60/120/300/600/1200/1800 秒退避。低分节点之间要求分数高 0.08 且有效速度高 10%；高分节点要求更大优势。切换继续观察两轮；原节点断流时，可连通且 ChatGPT 可达的新节点即使低于门槛也保留。完整测速每 60 分钟执行一次，按评分选择，并通过 HTTPS、TUN 和 ChatGPT 验证；新加坡或日本节点更快时不需要等待美国整体失效。相关参数为 `SakuraMinimumEffectiveKBps`、`SakuraMinimumBodyKBps`、`SakuraMaxFirstByteMs`、`SakuraHealthyScore`、`SakuraSwitchScoreMargin`、`SakuraSwitchRatio`、`SakuraRecoveryBackoffSeconds` 和 `SakuraRecoveryMaxSeconds`。
+当前默认 `SakuraFailoverOnly=true`：只做故障回退，不做日常主动优选。当前节点每 5 分钟通过本地混合代理下载 64 KiB 健康样本，并访问 ChatGPT 验证同一出口；正常或只是低速时保持当前节点不动。只有连接/读取中断，或 ChatGPT 不可达连续出现两次时，才比较当前节点和上次完整测速的前三名（并额外纳入池内其他地区各两个），按 60/120/300/600/1200/1800 秒退避。低分节点之间要求分数高 0.08 且有效速度高 10%；高分节点要求更大优势。切换继续观察两轮；原节点断流时，可连通且 ChatGPT 可达的新节点即使低于门槛也保留。定向恢复找不到候选时，只有当前节点断流或 ChatGPT 不可达才会再做一次有界全池扫描，避免卡在不可用节点；这不是定时优选。需要主动挑最快节点时可手动执行 `python -B gateway/latency_selector.py --once`；把 `SakuraFailoverOnly` 设为 `false` 会恢复每 60 分钟完整测速和低速切换，完整测速按评分选择，并通过 HTTPS、TUN 和 ChatGPT 验证。相关参数为 `SakuraMinimumEffectiveKBps`、`SakuraMinimumBodyKBps`、`SakuraMaxFirstByteMs`、`SakuraHealthyScore`、`SakuraSwitchScoreMargin`、`SakuraSwitchRatio`、`SakuraRecoveryBackoffSeconds` 和 `SakuraRecoveryMaxSeconds`。
 
 回滚前会分别验证原节点和新节点：控制器不可达时保留观察且不拉黑；原节点可用时切回，只有新节点确实不可用才拉黑；原节点不可用而新节点可用则保留新节点；两边都不可用才拉黑双方并立即触发定向恢复。单个节点的多个入口会逐个重试，单入口失败只进入 60 秒内存冷却，节点所有入口都失败才被拒绝。
 
@@ -74,7 +74,7 @@
 
 扫描参数：`SakuraCandidateProbeLimit`（默认 20）限制进入质量验证的候选数，`SakuraScanBudgetSeconds`（默认 180）限制质量阶段总耗时，`SakuraRejectionSeconds`（默认 300）是失败节点冷却，`SakuraRestoreVerifySeconds`（默认 15）是回滚验证预算，`SakuraProbeTimeoutSeconds` 是单次入口探测超时。完整测速候选还会过滤掉当前 `config.json` 中不存在的节点，避免订阅刷新期间探针配置缺项。
 
-运行状态位于 `state/sakura-health.json`，包含最近一次健康结果、连续失败次数、恢复退避和待观察切换；不记录节点凭据或完整请求。`state/sakura-selection.json` 是完整测速快照，`state/mode.json` 的当前节点以 sing-box 控制器实时值为准。进程重启时若存在待观察切换，会先完成一次健康观察再全量测速；`gateway_activity.py` 的入口计时只在内存中维护，`state/` 不记录请求内容。
+运行状态位于 `state/sakura-health.json`，包含最近一次健康结果、连续失败次数、恢复退避和待观察切换；不记录节点凭据或完整请求。`state/sakura-selection.json` 是完整测速快照，`state/mode.json` 的当前节点以 sing-box 控制器实时值为准。进程重启时若存在待观察切换，会先完成一次健康观察；默认故障回退模式下观察结束后只做健康检查，不执行全量优选；`gateway_activity.py` 的入口计时只在内存中维护，`state/` 不记录请求内容。
 
 ## 系统代理
 
