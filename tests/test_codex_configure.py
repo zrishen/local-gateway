@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'gateway'))
-spec = importlib.util.spec_from_file_location('codex_configure', ROOT / 'Configure-Codex-Switch.py')
+spec = importlib.util.spec_from_file_location('codex_configure', ROOT / 'scripts' / 'Configure-Codex-Switch.py')
 configure = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(configure)
 

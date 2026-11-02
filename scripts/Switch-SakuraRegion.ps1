@@ -1,9 +1,9 @@
 param([string]$Region = '', [switch]$List)
-. "$PSScriptRoot\Common.ps1"
+. "$PSScriptRoot\..\Common.ps1"
 
 $outboundsFile = Join-Path $StateDir 'sakura-outbounds.json'
 if (-not (Test-Path -LiteralPath $outboundsFile)) {
-    throw 'Embedded subscription is not imported. Run Import-SakuraSubscription.ps1 first.'
+    throw 'Embedded subscription is not imported. Run .\scripts\Import-SakuraSubscription.ps1 first.'
 }
 $data = Get-Content -LiteralPath $outboundsFile -Raw -Encoding UTF8 | ConvertFrom-Json
 $groups = $data.region_groups
@@ -33,13 +33,13 @@ $rows = @($rows | Sort-Object @{Expression='Active';Descending=$true}, Region)
 
 if ($List -or -not $Region) {
     $rows | Format-Table -AutoSize
-    if (-not $Region) { Write-Output 'Use -Region <name> to switch, for example: .\Switch-SakuraRegion.ps1 -Region 美国' }
+    if (-not $Region) { Write-Output 'Use -Region <name> to switch, for example: .\scripts\Switch-SakuraRegion.ps1 -Region 美国' }
     exit 0
 }
 
 $match = $rows | Where-Object { $_.Region -eq $Region -or $_.Code -eq $Region -or $_.Group -eq $Region } | Select-Object -First 1
 if (-not $match) {
-    throw "Unknown region: $Region. Run .\Switch-SakuraRegion.ps1 -List to see available regions."
+    throw "Unknown region: $Region. Run .\scripts\Switch-SakuraRegion.ps1 -List to see available regions."
 }
 
 $secret = (Get-Content -LiteralPath (Join-Path $StateDir 'controller-secret.txt') -Raw).Trim()

@@ -3,7 +3,7 @@ param([switch]$ProxyOnly, [string]$OutputName = '')
 
 $interface = Get-NetAdapter -Name $Settings.PhysicalInterface -ErrorAction SilentlyContinue
 if (-not $interface -or $interface.Status -ne 'Up') {
-    throw "Physical network interface is unavailable: $($Settings.PhysicalInterface). Run Initialize-Project.ps1 or update settings.local.json."
+    throw "Physical network interface is unavailable: $($Settings.PhysicalInterface). Run .\scripts\Initialize-Project.ps1 or update settings.local.json."
 }
 $secretFile = Join-Path $StateDir 'controller-secret.txt'
 if (-not (Test-Path -LiteralPath $secretFile)) {

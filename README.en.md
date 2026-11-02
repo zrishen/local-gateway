@@ -31,9 +31,9 @@ Open PowerShell as Administrator, enter the project directory, and complete the 
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\Initialize-Project.ps1
-.\Install-Core.ps1
-.\Install-Rules.ps1
+.\scripts\Initialize-Project.ps1
+.\scripts\Install-Core.ps1
+.\scripts\Install-Rules.ps1
 ```
 
 Then choose one upstream option.
@@ -49,7 +49,7 @@ Start SakuraCat, connect to a node, and disable its TUN/enhanced mode. Then run:
 **Import a subscription directly:**
 
 ```powershell
-.\Import-SakuraSubscription.ps1
+.\scripts\Import-SakuraSubscription.ps1
 .\Start.ps1
 ```
 
@@ -68,10 +68,10 @@ Once the status is healthy, you can start using it. Run `.\Stop.ps1` when you wa
 | Start | `.\Start.ps1` or `Start.cmd` |
 | Stop | `.\Stop.ps1` or `Stop.cmd` |
 | Show status | `.\Status.ps1` or `Status.cmd` |
-| Enable automatic startup | `.\Install-Autostart.ps1` |
-| Disable automatic startup | `.\Disable-Autostart.ps1` |
-| List available regions | `.\Switch-SakuraRegion.ps1 -List` |
-| Switch region | `.\Switch-SakuraRegion.ps1 -Region <region>` |
+| Enable automatic startup | `.\scripts\Install-Autostart.ps1` |
+| Disable automatic startup | `.\scripts\Disable-Autostart.ps1` |
+| List available regions | `.\scripts\Switch-SakuraRegion.ps1 -List` |
+| Switch region | `.\scripts\Switch-SakuraRegion.ps1 -Region <region>` |
 
 If the connection is unhealthy, run `.\Status.ps1` first, then see [Maintenance and diagnostics](docs/MAINTENANCE.md).
 

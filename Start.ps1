@@ -1,7 +1,7 @@
 . "$PSScriptRoot\Common.ps1"
 $task = Get-ScheduledTask -TaskName 'UnifiedSingBox' -ErrorAction SilentlyContinue
 if ($task) {
-    if (-not $task.Settings.Enabled) { throw 'Automatic startup is disabled. Use Install-Autostart.ps1 to enable it again.' }
+    if (-not $task.Settings.Enabled) { throw 'Automatic startup is disabled. Use .\scripts\Install-Autostart.ps1 to enable it again.' }
     Start-ScheduledTask -TaskName 'UnifiedSingBox'
     Write-Output 'Persistent unified service requested. SakuraCat is optional; direct fallback is automatic.'
     exit 0

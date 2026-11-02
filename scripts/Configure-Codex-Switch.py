@@ -8,7 +8,7 @@ import secrets
 import sys
 import tomllib
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 CODEX = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex')
 BACKUP = ROOT / 'work/codex-switch/backup'
 MARK = 'UNIFIED-CODEX-SWITCH'

@@ -3,7 +3,7 @@
 ## sing-box
 
 `bin/source.json` points to the official sing-box Windows release. The project
-does not bundle the binary in Git; `Install-Core.ps1` downloads it from the
+does not bundle the binary in Git; `scripts/Install-Core.ps1` downloads it from the
 configured URL and verifies the SHA-256 checksum.
 
 - Project: https://github.com/SagerNet/sing-box

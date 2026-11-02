@@ -32,6 +32,7 @@ local-gateway 在本机把系统代理、TUN、规则分流和可选的 AI 路�
 | `gateway/codex_router.py` | 可选 Codex 模型路由、压缩和阶段预算 |
 | `Service.ps1` | 常驻服务、内核/网关监督和配置刷新 |
 | `Supervisor.ps1` | V1 回滚时使用的兼容启动入口 |
+| `scripts/` | 安装、订阅、诊断等维护脚本；运行时入口仍在根目录 |
 
 ## 单网关进程
 

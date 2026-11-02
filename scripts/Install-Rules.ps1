@@ -1,6 +1,6 @@
 param([switch]$Force)
 $ErrorActionPreference = 'Stop'
-$Root = $PSScriptRoot
+$Root = Split-Path -Parent $PSScriptRoot
 $rulesDir = Join-Path $Root 'rules'
 $sourcePath = Join-Path $rulesDir 'source.json'
 $sources = Get-Content -LiteralPath $sourcePath -Raw -Encoding UTF8 | ConvertFrom-Json

@@ -1,5 +1,5 @@
 param([switch]$SkipUpdate, [switch]$Fallback)
-. "$PSScriptRoot\Common.ps1"
+. "$PSScriptRoot\..\Common.ps1"
 if (-not (Test-Elevated)) { throw 'Applying the upstream requires administrator privileges.' }
 
 $outboundsFile = Join-Path $StateDir 'sakura-outbounds.json'
@@ -23,13 +23,13 @@ if ($Fallback) {
     }
     if (-not $SkipUpdate) {
         if (-not (Test-Path -LiteralPath $urlFile)) {
-            throw 'Subscription URL is not configured. Run Import-SakuraSubscription.ps1 first.'
+            throw 'Subscription URL is not configured. Run .\scripts\Import-SakuraSubscription.ps1 first.'
         }
-        & "$PSScriptRoot\Update-SakuraUpstream.ps1" -Force
+        & "$Root\Update-SakuraUpstream.ps1" -Force
         if ($LASTEXITCODE -ne 0) { throw 'Subscription refresh failed; the running configuration was not changed.' }
     }
     if (-not (Test-Path -LiteralPath $outboundsFile)) {
-        throw 'Embedded subscription is not imported. Run Import-SakuraSubscription.ps1 first.'
+        throw 'Embedded subscription is not imported. Run .\scripts\Import-SakuraSubscription.ps1 first.'
     }
     $embedded = Get-Content -LiteralPath $outboundsFile -Raw -Encoding UTF8 | ConvertFrom-Json
     if ([int]$embedded.count -lt 1) { throw 'Embedded subscription contains no nodes.' }
@@ -39,7 +39,7 @@ $configPath = Join-Path $Root 'config.json'
 $backupPath = Join-Path $StateDir 'config.before-upstream.json'
 if (Test-Path -LiteralPath $configPath) { Copy-Item -LiteralPath $configPath -Destination $backupPath -Force }
 try {
-    & "$PSScriptRoot\Generate-Config.ps1" | Out-Null
+    & "$Root\Generate-Config.ps1" | Out-Null
     $generated = Get-Content -LiteralPath (Join-Path $StateDir 'upstream.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $expected = if ($Fallback) { 'sakuracat' } else { 'subscription' }
     if ($generated.Mode -ne $expected) {
@@ -80,7 +80,7 @@ do {
 } while ((Get-Date) -lt $deadline)
 if (-not $newPid) { throw 'Core did not restart within 40 seconds.' }
 
-& "$PSScriptRoot\Restart-Gateway.ps1"
+& "$Root\Restart-Gateway.ps1"
 if ($LASTEXITCODE -ne 0) {
     throw 'Core switched, but the gateway restart failed. Run Restart-Gateway.ps1 manually.'
 }

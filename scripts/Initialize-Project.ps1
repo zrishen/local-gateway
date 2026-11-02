@@ -4,7 +4,7 @@ param(
     [switch]$Force
 )
 $ErrorActionPreference = 'Stop'
-$Root = $PSScriptRoot
+$Root = Split-Path -Parent $PSScriptRoot
 $localPath = Join-Path $Root 'settings.local.json'
 
 if ((Test-Path -LiteralPath $localPath) -and -not $Force) {

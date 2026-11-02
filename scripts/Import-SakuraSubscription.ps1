@@ -1,5 +1,5 @@
 param([string]$Url = '')
-. "$PSScriptRoot\Common.ps1"
+. "$PSScriptRoot\..\Common.ps1"
 
 $urlFile = Join-Path $StateDir 'sakura-subscription-url.txt'
 if (-not $Url) {
@@ -28,7 +28,7 @@ try {
     Write-Warning "Could not restrict subscription file ACL: $($_.Exception.Message)"
 }
 
-& "$PSScriptRoot\Update-SakuraUpstream.ps1" -Force
+& "$Root\Update-SakuraUpstream.ps1" -Force
 if ($LASTEXITCODE -ne 0) { throw 'Subscription import did not produce usable nodes.' }
 $status = Get-Content -LiteralPath (Join-Path $StateDir 'sakura-subscription.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 Write-Output ("Subscription imported: {0} nodes at {1}" -f $status.count, $status.updated_at)

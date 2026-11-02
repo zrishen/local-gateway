@@ -1,12 +1,12 @@
 # 维护指南
 
-以下命令均在项目根目录运行。需要 TUN 或系统代理的操作请在管理员 PowerShell 中执行。
+以下命令均在项目根目录运行。安装、订阅、诊断等维护脚本位于 `scripts/`；日常启动、停止、重启和状态入口仍在根目录。需要 TUN 或系统代理的操作请在管理员 PowerShell 中执行。
 
 ## 初始化
 
 ```powershell
-.\Initialize-Project.ps1
-.\Install-Core.ps1
+.\scripts\Initialize-Project.ps1
+.\scripts\Install-Core.ps1
 ```
 
 初始化只写 `settings.local.json`，不会把网卡名或个人 Python 路径写入仓库文件。
@@ -20,22 +20,22 @@
 | 完整重启（Stop 后立即 Start） | `.\Restart-Service.ps1` |
 | 只重启网关进程（不重启核心） | `.\Restart-Gateway.ps1` |
 | 状态 | `.\Status.ps1` |
-| 健康检查 | `$python -B .\Health.py` |
-| 开启自启 | `.\Install-Autostart.ps1` |
-| 取消自启 | `.\Disable-Autostart.ps1` |
-| 导出/查看地区 | `.\Switch-SakuraRegion.ps1 -List` |
-| 切换地区 | `.\Switch-SakuraRegion.ps1 -Region 日本` |
+| 健康检查 | `$python -B .\scripts\Health.py` |
+| 开启自启 | `.\scripts\Install-Autostart.ps1` |
+| 取消自启 | `.\scripts\Disable-Autostart.ps1` |
+| 导出/查看地区 | `.\scripts\Switch-SakuraRegion.ps1 -List` |
+| 切换地区 | `.\scripts\Switch-SakuraRegion.ps1 -Region 日本` |
 | 清理临时文件预览 | `.\tools\Clean-Workspace.ps1` |
 
 ## 订阅与节点
 
 ```powershell
-.\Import-SakuraSubscription.ps1
+.\scripts\Import-SakuraSubscription.ps1
 .\Update-SakuraUpstream.ps1 -Force
-.\Apply-Upstream.ps1
+.\scripts\Apply-Upstream.ps1
 ```
 
-`Import-SakuraSubscription.ps1` 不传 `-Url` 时尝试读取本机 SakuraCat 配置。订阅地址和节点凭据只写入 `state/`。
+`scripts\Import-SakuraSubscription.ps1` 不传 `-Url` 时尝试读取本机 SakuraCat 配置。订阅地址和节点凭据只写入 `state/`。
 
 新增的 `codex-official-in` 入站和 `codex-official` 选择器属于 sing-box 配置变更，必须执行一次完整的
 `Stop.ps1` / `Start.ps1`（或 `Restart-Service.ps1`）才会重新生成 `config.json`。
@@ -49,7 +49,7 @@
 回退到 SakuraCat 本地代理：
 
 ```powershell
-.\Apply-Upstream.ps1 -Fallback
+.\scripts\Apply-Upstream.ps1 -Fallback
 ```
 
 ## 入口目录

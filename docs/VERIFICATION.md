@@ -37,7 +37,7 @@
 
 ```powershell
 $python = (Get-Content .\settings.local.json -Raw | ConvertFrom-Json).PythonPath
-& $python -B .\Health.py
+& $python -B .\scripts\Health.py
 & $python -B -m unittest discover -s tests
 ```
 

@@ -1,4 +1,4 @@
-. "$PSScriptRoot\Common.ps1"
+. "$PSScriptRoot\..\Common.ps1"
 if (-not (Test-Elevated)) {
     $child = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"") -Verb RunAs -WindowStyle Hidden -PassThru
     Write-Output "Administrator installation requested (PID $($child.Id)). See state\install.json."

@@ -13,7 +13,7 @@ import sys
 import time
 import urllib.request
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'gateway'))
 from settings_config import load_settings
 

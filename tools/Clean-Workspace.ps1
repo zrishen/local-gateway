@@ -32,7 +32,7 @@ if (Test-Path -LiteralPath $scratch) {
         }
     }
 }
-foreach ($directory in @('', 'gateway','tests','tools\codex','work\codex-switch')) {
+foreach ($directory in @('', 'gateway','tests','tools\codex','work\codex-switch','scripts')) {
     $cache = Join-Path (Join-Path $projectRoot $directory) '__pycache__'
     if (Test-Path -LiteralPath $cache) {
         foreach ($file in Get-ChildItem -LiteralPath $cache -File -Force) {

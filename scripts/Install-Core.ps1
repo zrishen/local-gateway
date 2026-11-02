@@ -1,6 +1,6 @@
 param([switch]$Force)
 $ErrorActionPreference = 'Stop'
-$Root = $PSScriptRoot
+$Root = Split-Path -Parent $PSScriptRoot
 $sourcePath = Join-Path $Root 'bin\source.json'
 $source = Get-Content -LiteralPath $sourcePath -Raw -Encoding UTF8 | ConvertFrom-Json
 $destination = Join-Path $Root 'bin\sing-box.exe'

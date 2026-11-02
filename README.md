@@ -31,9 +31,9 @@ local-gateway 是一个在本机运行的 Windows 网络入口，用来统一管
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\Initialize-Project.ps1
-.\Install-Core.ps1
-.\Install-Rules.ps1
+.\scripts\Initialize-Project.ps1
+.\scripts\Install-Core.ps1
+.\scripts\Install-Rules.ps1
 ```
 
 然后选择一种上游方式。
@@ -49,7 +49,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 **直接导入订阅：**
 
 ```powershell
-.\Import-SakuraSubscription.ps1
+.\scripts\Import-SakuraSubscription.ps1
 .\Start.ps1
 ```
 
@@ -68,10 +68,10 @@ Set-ExecutionPolicy -Scope Process Bypass
 | 启动 | `.\Start.ps1` 或 `Start.cmd` |
 | 停止 | `.\Stop.ps1` 或 `Stop.cmd` |
 | 查看状态 | `.\Status.ps1` 或 `Status.cmd` |
-| 开启自启 | `.\Install-Autostart.ps1` |
-| 取消自启 | `.\Disable-Autostart.ps1` |
-| 查看可选地区 | `.\Switch-SakuraRegion.ps1 -List` |
-| 切换地区 | `.\Switch-SakuraRegion.ps1 -Region <地区名>` |
+| 开启自启 | `.\scripts\Install-Autostart.ps1` |
+| 取消自启 | `.\scripts\Disable-Autostart.ps1` |
+| 查看可选地区 | `.\scripts\Switch-SakuraRegion.ps1 -List` |
+| 切换地区 | `.\scripts\Switch-SakuraRegion.ps1 -Region <地区名>` |
 
 如果连接异常，先运行 `.\Status.ps1` 查看当前状态，再参考[维护与诊断](docs/MAINTENANCE.md)。
 

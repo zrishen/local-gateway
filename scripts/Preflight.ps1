@@ -1,4 +1,4 @@
-. "$PSScriptRoot\Common.ps1"
+. "$PSScriptRoot\..\Common.ps1"
 if (Get-OwnedProcess) { throw 'The main TUN is already running.' }
 if (Get-OwnedProcess 'preflight.json') { Write-Output 'Preflight proxy is already running.'; exit 0 }
 if (-not (Test-TcpPort $Settings.SakuraHost $Settings.SakuraPort)) { throw 'SakuraCat local proxy is unavailable.' }
