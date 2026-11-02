@@ -197,6 +197,14 @@ class OfficialRouteManager:
             self.settings.get('CodexOfficialHealthMinutes', 3)) * 60))
         self.sticky_seconds = max(0, int(float(
             self.settings.get('SakuraStickySeconds', 600))))
+        configured_preferred = self.settings.get('CodexOfficialPreferredNodes') or []
+        if isinstance(configured_preferred, str):
+            configured_preferred = [configured_preferred]
+        if not isinstance(configured_preferred, (list, tuple)):
+            configured_preferred = []
+        self.preferred_nodes = list(dict.fromkeys(
+            str(value).strip() for value in configured_preferred
+            if str(value).strip()))
         self.state_path = Path(state_path or self.root / 'state/codex-official-route.json')
         self._probe = probe or probe_candidate
         self._request = request or self._controller_request
@@ -301,6 +309,22 @@ class OfficialRouteManager:
         return (item.get('score', 0),
                 item.get('effective_throughput_kbps', 0),
                 -item.get('first_byte_ms', 0))
+
+    def _preferred_candidate(self, ranked):
+        """Return the best healthy node explicitly preferred by configuration.
+
+        Preferred nodes only win while they pass the same health gates as the
+        regular ranking. A failed node stays out of ``ranked`` for this scan,
+        so the lane still falls back to another candidate.
+        """
+        if not self.preferred_nodes:
+            return None
+        candidates = [item for item in ranked
+                      if item.get('tag') in self.preferred_nodes]
+        if not candidates:
+            return None
+        candidates.sort(key=self._rank_key, reverse=True)
+        return candidates[0]
 
     def _ranked_with(self, active=None):
         """Keep the last scan's alternatives instead of collapsing to one node."""
@@ -459,16 +483,20 @@ class OfficialRouteManager:
             ranked = preferred
         self._ranked = ranked[:5]
         current = next((item for item in ranked if item['tag'] == current_tag), None)
-        chosen = ranked[0]
-        if (current is not None and chosen['tag'] != current['tag']
+        chosen = self._preferred_candidate(ranked) or ranked[0]
+        pinned = chosen.get('tag') in self.preferred_nodes
+        # A configured preferred node reclaims the lane as soon as it passes
+        # its probes; stickiness must not keep a lower-priority node in place.
+        if (not pinned and current is not None and chosen['tag'] != current['tag']
                 and time.time() - self._last_switch < self.sticky_seconds
                 and not route_policy.is_meaningfully_better(
                     chosen, current, self.policy)):
             chosen = current
         if current is not None and chosen['tag'] == current['tag']:
             chosen = current
-        elif current is not None and not route_policy.is_meaningfully_better(
-                chosen, current, self.policy):
+        elif (not pinned and current is not None
+              and not route_policy.is_meaningfully_better(
+                  chosen, current, self.policy)):
             chosen = current
         try:
             if chosen['tag'] != current_tag:

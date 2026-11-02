@@ -185,6 +185,57 @@ class OfficialRouteTests(unittest.TestCase):
         self.assertFalse(state['degraded'])
         self.assertEqual(state['active_tag'], 'b')
 
+    def test_preferred_node_is_chosen_over_a_higher_scored_node(self):
+        root = self.temp_root()
+        controller = FakeController(['a', 'b'], current='a')
+        manager = self.manager(root, controller, {
+            'a': self.good(90, 150), 'b': self.good(40, 100)},
+            CodexOfficialPreferredNodes='b')
+        self.assertEqual(manager.preferred_nodes, ['b'])
+        selected = manager.select_once()
+        self.assertEqual(selected['tag'], 'b')
+        self.assertEqual(controller.selected, ['b'])
+        state = json.loads((root / 'state/codex-official-route.json').read_text())
+        self.assertEqual(state['active_tag'], 'b')
+
+    def test_preferred_node_falls_back_when_it_cannot_reach_chatgpt(self):
+        root = self.temp_root()
+        controller = FakeController(['a', 'b'], current='a')
+        manager = self.manager(root, controller, {
+            'a': self.good(90, 150),
+            'b': {**self.good(40, 100), 'chatgpt_ok': False}},
+            CodexOfficialPreferredNodes=['b'])
+        selected = manager.select_once()
+        self.assertEqual(selected['tag'], 'a')
+        self.assertEqual(controller.selected, [])
+
+    def test_preferred_node_reclaims_the_lane_after_recovery(self):
+        root = self.temp_root()
+        controller = FakeController(['a', 'b'], current='a')
+        manager = self.manager(root, controller, {
+            'a': self.good(90, 150),
+            'b': {**self.good(40, 100), 'chatgpt_ok': False}},
+            CodexOfficialPreferredNodes=['b'])
+        self.assertEqual(manager.select_once()['tag'], 'a')
+        manager.probe_members = lambda members: [
+            {**member, **(self.good(40, 100) if member['tag'] == 'b'
+                          else self.good(90, 150))}
+            for member in members]
+        selected = manager.select_once()
+        self.assertEqual(selected['tag'], 'b')
+        self.assertEqual(controller.selected, ['b'])
+
+    def test_preferred_node_stays_out_after_a_failure(self):
+        root = self.temp_root()
+        controller = FakeController(['a', 'b'], current='a')
+        manager = self.manager(root, controller, {
+            'a': self.good(90, 150), 'b': self.good(95, 160)},
+            CodexOfficialPreferredNodes=['b'])
+        manager._failed_nodes['b'] = time.monotonic() + 60
+        selected = manager.select_once()
+        self.assertEqual(selected['tag'], 'a')
+        self.assertEqual(controller.selected, [])
+
     def test_oversized_upload_does_not_blame_the_selected_node(self):
         root = self.temp_root()
         controller = FakeController(['a'])
