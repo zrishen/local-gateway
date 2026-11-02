@@ -87,7 +87,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 - [架构与组件](docs/ARCHITECTURE.md)
 - [维护、诊断与恢复](docs/MAINTENANCE.md)
 - [Codex 模型路由](docs/CODEX.md)
-- [Codex 生图工具](tools/codex-imagegen/README.md)
+- [Codex 生图工具](.claude/skills/codex-imagegen/SKILL.md)
 - [验证范围](docs/VERIFICATION.md)
 - [第三方声明](THIRD_PARTY_NOTICES.md)
 

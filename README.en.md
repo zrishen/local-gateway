@@ -87,7 +87,7 @@ If the connection is unhealthy, run `.\Status.ps1` first, then see [Maintenance 
 - [Architecture and components (Chinese)](docs/ARCHITECTURE.md)
 - [Maintenance, diagnostics, and recovery (Chinese)](docs/MAINTENANCE.md)
 - [Codex model routing (Chinese)](docs/CODEX.md)
-- [Codex image generation](tools/codex-imagegen/README.md)
+- [Codex image generation](.claude/skills/codex-imagegen/SKILL.md)
 - [Verification scope (Chinese)](docs/VERIFICATION.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 
