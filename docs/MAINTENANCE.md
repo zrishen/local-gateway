@@ -146,7 +146,7 @@ Codex Responses 并转换回 Anthropic SSE；其他模型不受影响。`codex/`
 `tools/codex-imagegen/generate.py` 通过 Codex CLI 内置 `image_gen` 生成或编辑图片，
 使用 `~/.codex/auth.json` 的 ChatGPT 登录，不需要 `OPENAI_API_KEY`。它运行嵌套的
 `codex exec --ephemeral --sandbox workspace-write`，通常需要 1 分钟以上，并消耗
-Codex/ChatGPT 生图额度。用法和参数见 [.claude/skills/codex-imagegen/SKILL.md](../.claude/skills/codex-imagegen/SKILL.md)。
+Codex/ChatGPT 生图额度。用法和参数见 [tools/codex-imagegen/SKILL.md](../tools/codex-imagegen/SKILL.md)。
 
 Claude Code 在项目内可直接使用 `codex-imagegen` skill。该能力不经过
 `/v1/messages` 桥接，因为 `image_gen` 由 Codex 客户端执行，而不是 Responses 后端。
