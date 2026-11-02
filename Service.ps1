@@ -9,6 +9,7 @@ $coreRetryAt = Get-Date
 $gatewayRetryAt = Get-Date
 $gatewayStateSignature = ''
 $stopPath = Join-Path $StateDir 'service.stop'
+$gatewayRestartRequest = Join-Path $StateDir 'gateway-restart.request'
 $runtimePath = Join-Path $StateDir 'runtime.json'
 $statusPath = Join-Path $StateDir 'status.json'
 $previousPhase = ''
@@ -69,6 +70,7 @@ function Update-GatewayState {
 }
 try {
     if (Test-Path -LiteralPath $stopPath) { Remove-Item -LiteralPath $stopPath }
+    if (Test-Path -LiteralPath $gatewayRestartRequest) { Remove-Item -LiteralPath $gatewayRestartRequest }
     Remove-StaleProbeProcesses
     Save-ProxySettings
     $endpointRefreshMinutes = [Math]::Max(1, [double]$Settings.SakuraEndpointRefreshMinutes)
@@ -114,6 +116,15 @@ try {
                 $coreProcess = $null
                 $coreRetryAt = (Get-Date).AddSeconds(10)
             }
+        }
+        if (Test-Path -LiteralPath $gatewayRestartRequest) {
+            Remove-Item -LiteralPath $gatewayRestartRequest -Force -ErrorAction SilentlyContinue
+            if ($gatewayProcess) {
+                Service-Log "Gateway restart requested; stopping PID $($gatewayProcess.Id)."
+                Stop-Managed $gatewayProcess
+                $gatewayProcess = $null
+            }
+            $gatewayRetryAt = Get-Date
         }
         if ($gatewayProcess) {
             $gatewayProcess.Refresh()

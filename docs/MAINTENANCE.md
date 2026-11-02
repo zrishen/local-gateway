@@ -17,8 +17,9 @@
 |---|---|
 | 启动 | `.\Start.ps1` 或 `Start.cmd` |
 | 停止 | `.\Stop.ps1` 或 `Stop.cmd` |
+| 完整重启（Stop 后立即 Start） | `.\Restart-Service.ps1` |
+| 只重启网关进程（不重启核心） | `.\Restart-Gateway.ps1` |
 | 状态 | `.\Status.ps1` |
-| 重启网关进程 | `.\Restart-Gateway.ps1` |
 | 健康检查 | `$python -B .\Health.py` |
 | 开启自启 | `.\Install-Autostart.ps1` |
 | 取消自启 | `.\Disable-Autostart.ps1` |
@@ -37,8 +38,13 @@
 `Import-SakuraSubscription.ps1` 不传 `-Url` 时尝试读取本机 SakuraCat 配置。订阅地址和节点凭据只写入 `state/`。
 
 新增的 `codex-official-in` 入站和 `codex-official` 选择器属于 sing-box 配置变更，必须执行一次完整的
-`Stop.ps1` / `Start.ps1` 才会重新生成 `config.json`。`Restart-Gateway.ps1` 只重启 Python
-网关进程，不重启 sing-box 核心，也不会应用新入站；在完整重启前 Router 会自动回退到原有代理通道。
+`Stop.ps1` / `Start.ps1`（或 `Restart-Service.ps1`）才会重新生成 `config.json`。
+`Restart-Gateway.ps1` 只重启 Python 网关进程，不重启 sing-box 核心，也不会应用新入站；
+在完整重启前 Router 会自动回退到原有代理通道。
+
+完整重启必须使用 `Restart-Service.ps1` 或把 `Stop.ps1` 和 `Start.ps1` 放在同一条命令里连续执行。
+不要把停止和启动拆成两次等待：网关停止后 AI 会话自己的连接也可能中断，无法再发起后续命令。
+脚本会等待 8799 和 `state/status.json` 的 `Phase=running`，结果写入 `state/service-restart.json`。
 
 回退到 SakuraCat 本地代理：
 
@@ -98,12 +104,13 @@
 | `logs/service.log` | 常驻服务生命周期 |
 | `logs/gateway.stderr.log` | Python 网关错误 |
 | `state/gateway-restart.json` | 最近一次 `Restart-Gateway.ps1` 结果 |
+| `state/service-restart.json` | 最近一次 `Restart-Service.ps1` 结果 |
 | `logs/ai-upstream.jsonl` | AI 上游连接阶段、重试次数、状态码和请求编号（不记录地址、密钥或请求正文） |
 | `logs/sing-box.log` | sing-box 运行日志 |
 
 日志不要直接公开，其中可能包含访问域名、节点地址和本机时间。
 
-`state/status.json` 记录 `CorePid`、`GatewayPid`、`PublicPort` 和 `Phase`，`state/gateway.json` 记录网关进程的 PID、启动时间和 `ServiceVersion`。客户端始终使用 `PublicPort`（默认 `8799`），只有一个 `unified_gateway.py` 进程监听该端口。`Restart-Gateway.ps1` 校验 PID 身份后停止旧进程，等待 `Service.ps1` 拉起新进程并写入新 PID；重启期间新连接会短暂失败，已经建立的单条流无法跨进程迁移。sing-box 核心和 TUN 不受影响。
+`state/status.json` 记录 `CorePid`、`GatewayPid`、`PublicPort` 和 `Phase`，`state/gateway.json` 记录网关进程的 PID、启动时间和 `ServiceVersion`。客户端始终使用 `PublicPort`（默认 `8799`），只有一个 `unified_gateway.py` 进程监听该端口。`Restart-Gateway.ps1` 校验 PID 身份后写入 `state/gateway-restart.request`，由有权限的 `Service.ps1` 停止并拉起网关进程，再等待新 PID 和 `8799` 就绪。调用方不需要管理员权限；重启期间新连接会短暂失败，已经建立的单条流无法跨进程迁移。sing-box 核心和 TUN 不受影响。
 
 ### API 上游连接与 502
 

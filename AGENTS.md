@@ -52,7 +52,8 @@
 ## 替换生产
 
 - 仅修改 Python 网关代码时，可使用 `.\Restart-Gateway.ps1` 重启单网关进程；sing-box 核心和 TUN 保持运行。
-- `Service.ps1`、`Supervisor.ps1`、生成配置、TUN 或系统路由相关修改，使用 `.\Stop.ps1` 和 `.\Start.ps1` 完整重启。
+- `Service.ps1`、`Supervisor.ps1`、生成配置、TUN 或系统路由相关修改，使用 `.\Restart-Service.ps1` 完整重启。
+- 完整重启必须由同一次调用连续完成 Stop 和 Start，不能拆成两次等待；网关停止后 AI 会话自身的连接可能中断，无法再发起启动命令。`Restart-Service.ps1` 会等待 `8799` 和 `Phase=running`，结果写入 `state/service-restart.json`。
 - 重启可由用户明确授权的 AI 会话执行；执行前仍需确认没有必须保留的长流。需要完整重启时，如果 AI 请求自身经过生产网关，必须先说明死锁风险并由用户确认后再执行。
 - 替换前确认当前没有必须保留的长流；已经建立的单条流无法跨进程迁移。
 - 替换后验证公共端口 `8799`、网关进程、sing-box 核心、健康检查和一个代表性端到端请求。

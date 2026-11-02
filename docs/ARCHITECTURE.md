@@ -37,7 +37,7 @@ local-gateway 在本机把系统代理、TUN、规则分流和可选的 AI 路�
 
 客户端只使用 `127.0.0.1:8799`。`unified_gateway.py` 直接监听这个端口，同时处理 HTTP、CONNECT、SOCKS5、AI 和 Codex 路由。`Service.ps1` 监督这个进程；进程退出后约 500 ms 自动拉起。
 
-没有热备后端或滚动刷新。网关重启会有短暂中断，已经建立的 TCP/TLS 流会结束；`Restart-Gateway.ps1` 只重启网关进程，sing-box 核心和 TUN 保持不变。涉及 `Service.ps1`、生成配置、TUN 或系统路由的修改使用 `Stop.ps1` / `Start.ps1` 完整重启。
+没有热备后端或滚动刷新。网关重启会有短暂中断，已经建立的 TCP/TLS 流会结束；`Restart-Gateway.ps1` 只重启网关进程，sing-box 核心和 TUN 保持不变。涉及 `Service.ps1`、生成配置、TUN 或系统路由的修改使用 `Restart-Service.ps1` 完整重启：它在同一个进程中连续执行 `Stop.ps1` 和 `Start.ps1`，避免停止后调用方连接中断而无法再发起启动。
 
 核心刷新策略只查询这一个网关的 `/__status`，不再聚合多个后端。
 

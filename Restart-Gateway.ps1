@@ -1,5 +1,6 @@
 . "$PSScriptRoot\Common.ps1"
 $gatewayStatePath = Join-Path $StateDir 'gateway.json'
+$requestPath = Join-Path $StateDir 'gateway-restart.request'
 $restartResult = Join-Path $StateDir 'gateway-restart.json'
 try {
     $state = Get-Content -LiteralPath $gatewayStatePath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
@@ -12,9 +13,11 @@ try {
     if ($oldTicks -and $process.StartTime.ToUniversalTime().Ticks.ToString() -ne $oldTicks) {
         throw 'Gateway PID identity changed; refusing to stop it.'
     }
-    # Kill the whole tree so isolated probe cores cannot survive the restart.
-    & taskkill.exe /PID $oldPid /T /F 2>$null | Out-Null
-    $deadline = (Get-Date).AddSeconds(30)
+
+    # Ask the privileged supervisor to restart its own child. The caller may
+    # be unelevated and cannot terminate the gateway process directly.
+    Write-StateJson $requestPath @{Pid=$oldPid;StartTicks=$oldTicks;RequestedAt=(Get-Date -Format o)}
+    $deadline = (Get-Date).AddSeconds(60)
     $newPid = $null
     do {
         Start-Sleep -Milliseconds 250
@@ -26,7 +29,7 @@ try {
             }
         } catch { }
     } while ((Get-Date) -lt $deadline)
-    if (-not $newPid) { throw 'Gateway did not restart within 30 seconds. See logs\gateway.stderr.log.' }
+    if (-not $newPid) { throw 'Gateway did not restart within 60 seconds. See logs\gateway.stderr.log.' }
     $portDeadline = (Get-Date).AddSeconds(10)
     while (-not (Test-TcpPort '127.0.0.1' $Settings.PublicPort) -and (Get-Date) -lt $portDeadline) {
         Start-Sleep -Milliseconds 250
@@ -38,6 +41,7 @@ try {
     Write-Output ("Gateway restarted: PID {0} -> {1}; core and TUN untouched." -f $oldPid, $newPid)
     exit 0
 } catch {
+    if (Test-Path -LiteralPath $requestPath) { Remove-Item -LiteralPath $requestPath -Force -ErrorAction SilentlyContinue }
     Write-StateJson $restartResult @{Ok=$false;Error=$_.Exception.Message;At=(Get-Date -Format o)}
     Write-Error $_.Exception.Message
     exit 1
