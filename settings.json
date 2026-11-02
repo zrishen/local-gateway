@@ -3,10 +3,6 @@
   "SakuraPort": 12450,
   "SakuraControllerPort": 12440,
   "PublicPort": 8799,
-  "GatewayBackendPorts": [
-    18801,
-    18802
-  ],
   "MixedPort": 12550,
   "DnsPort": 12553,
   "ControllerPort": 12540,

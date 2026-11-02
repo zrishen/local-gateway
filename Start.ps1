@@ -1,4 +1,3 @@
-param([int]$WaitSeconds = 180)
 . "$PSScriptRoot\Common.ps1"
 $task = Get-ScheduledTask -TaskName 'UnifiedSingBox' -ErrorAction SilentlyContinue
 if ($task) {
@@ -7,10 +6,10 @@ if ($task) {
     Write-Output 'Persistent unified service requested. SakuraCat is optional; direct fallback is automatic.'
     exit 0
 }
-if (Get-OwnedProcess) { Write-Output 'Unified sing-box is already running.'; exit 0 }
+if (Get-OwnedProcess) { Write-Output 'Unified service is already running.'; exit 0 }
 & "$Root\Generate-Config.ps1"
-$arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$Root\Supervisor.ps1`"", '-WaitSeconds', $WaitSeconds)
+$arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$Root\Service.ps1`"")
 $startOptions = @{FilePath="$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"; ArgumentList=$arguments; WorkingDirectory=$Root; WindowStyle='Hidden'; PassThru=$true}
 if (-not (Test-Elevated)) { $startOptions.Verb = 'RunAs' }
-$supervisor = Start-Process @startOptions
-Write-Output "Supervisor requested (PID $($supervisor.Id)). See state\status.json and logs\supervisor.log."
+$service = Start-Process @startOptions
+Write-Output "Persistent service requested (PID $($service.Id)). See state\status.json and logs\service.log."

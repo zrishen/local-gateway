@@ -1,7 +1,7 @@
-"""Keep official Codex on its own measured US lane.
+"""Keep official Codex on its own measured lane.
 
-The global ``sakura`` selector follows the US/Singapore pool used by browser
-traffic. Official Codex needs a stable US egress, so config generation creates
+The global ``sakura`` selector follows the regional pool used by browser
+traffic. Official Codex uses an independent group, so config generation creates
 a second selector (``codex-official``) and a dedicated loopback inbound. This
 module owns only that selector; ``latency_selector`` never changes it.
 
@@ -58,8 +58,7 @@ def read_core_pid(root):
 def load_route_state(root, max_age=None, core_pid=None):
     """Read the official-lane snapshot and reject stale observations.
 
-    A state file written by the primary backend is useful to the standby
-    backend too. It becomes invalid when the core restarts because the new
+    The snapshot becomes invalid when the core restarts because the new
     selector starts from its configured default.
     """
     path = Path(root) / 'state/codex-official-route.json'

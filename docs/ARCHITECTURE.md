@@ -6,13 +6,11 @@ local-gateway 在本机把系统代理、TUN、规则分流和可选的 AI 路�
 
 ```text
 应用
-├─ 系统代理 127.0.0.1:8799（固定入口）
-│  ├─ 主后端 127.0.0.1:18801
-│  └─ 热备后端 127.0.0.1:18802
-│     ├─ HTTP / CONNECT / SOCKS5 → 127.0.0.1:12550 → sing-box
-│     ├─ 官方 Codex → 127.0.0.1:12551 → codex-official（仅美国）
-│     ├─ Claude Code 官方模型 → /v1/messages → Anthropic/Responses 桥接 → 官方 Codex
-│     └─ 本地 AI API → 协议清洗/转换 → 可选上游
+├─ 系统代理 127.0.0.1:8799（唯一网关端口）
+│  ├─ HTTP / CONNECT / SOCKS5 → 127.0.0.1:12550 → sing-box
+│  ├─ 官方 Codex → 127.0.0.1:12551 → codex-official
+│  ├─ Claude Code 官方模型 → /v1/messages → Anthropic/Responses 桥接 → 官方 Codex
+│  └─ 本地 AI API → 协议清洗/转换 → 可选上游
 └─ 系统路由 → UnifiedBox TUN → sing-box
                               ├─ 国内/私有地址 → direct
                               ├─ 可选公司域名 → company-direct
@@ -23,24 +21,25 @@ local-gateway 在本机把系统代理、TUN、规则分流和可选的 AI 路�
 
 | 路径 | 职责 |
 |---|---|
-| `gateway/stable_entry.py` | 固定公开端口，检测主/备后端并原样转发 TCP 字节 |
-| `gateway/unified_gateway.py` | 内部后端：HTTP/SOCKS 转发、AI 入口和 Codex 路由 |
+| `gateway/unified_gateway.py` | 唯一网关进程：HTTP/SOCKS 转发、AI 入口和 Codex 路由 |
 | `gateway/mode_monitor.py` | 系统代理策略、Rule/Direct 模式和状态写入 |
 | `Generate-Config.ps1` | 生成 sing-box 配置；不直接手改 `config.json` |
 | `gateway/sakura_subscription.py` | 订阅解析、地区分组和节点出站生成 |
 | `gateway/endpoint_catalog.py` | 入口 IP 发现、TCP/TLS 探测、健康选择和过期清理 |
 | `gateway/route_policy.py` | 节点评分、切换迟滞和恢复退避 |
 | `gateway/latency_selector.py` | 普通流量节点测速、定向恢复与切换 |
-| `gateway/official_route.py` | 官方 Codex 独立美国选择器和真实请求反馈 |
+| `gateway/official_route.py` | 官方 Codex 独立通道选择器和真实请求反馈 |
 | `gateway/codex_router.py` | 可选 Codex 模型路由、压缩和阶段预算 |
 | `Service.ps1` | 常驻服务、内核/网关监督和配置刷新 |
-| `Supervisor.ps1` | 未安装计划任务时的兼容启动入口 |
+| `Supervisor.ps1` | V1 回滚时使用的兼容启动入口 |
 
-## 固定入口与后端热备
+## 单网关进程
 
-客户端只使用 `127.0.0.1:8799`。`stable_entry.py` 在这个端口上保留一个轻量 TCP 入口，并把原始字节转发到 `GatewayBackendPorts` 中的主后端；主后端退出、连接失败或被服务脚本主动重启时，它改走备用后端。两个后端执行相同的 HTTP、CONNECT、SOCKS5、AI 和 Codex 路由逻辑，因此客户端地址与系统代理配置不需要改变。
+客户端只使用 `127.0.0.1:8799`。`unified_gateway.py` 直接监听这个端口，同时处理 HTTP、CONNECT、SOCKS5、AI 和 Codex 路由。`Service.ps1` 监督这个进程；进程退出后约 500 ms 自动拉起。
 
-主后端负责模式监控和节点测速，备用后端不重复运行这些后台任务。入口按秒检查活动后端，主后端恢复后新连接回到主后端。已经建立的 TCP/TLS 流不迁移；后端进程在中途退出时，该条流仍会结束，但固定入口保持监听，后续请求会继续到达备用后端。后端代码刷新先等待备用和主后端的 AI 请求空闲，再依次重启两个后端；AI 维护状态会同时查询两个后端，避免其中一个仍在流式响应时重启核心。
+没有热备后端或滚动刷新。网关重启会有短暂中断，已经建立的 TCP/TLS 流会结束；`Restart-Gateway.ps1` 只重启网关进程，sing-box 核心和 TUN 保持不变。涉及 `Service.ps1`、生成配置、TUN 或系统路由的修改使用 `Stop.ps1` / `Start.ps1` 完整重启。
+
+核心刷新策略只查询这一个网关的 `/__status`，不再聚合多个后端。
 
 ## 配置层次
 
@@ -91,11 +90,12 @@ sakura-region-us
 
 ## 官方 Codex 独立通道
 
-配置生成器从 `CodexOfficialGroup`（默认 `sakura-region-us`）复制节点列表，生成独立选择器
-`codex-official` 和回环入站 `codex-official-in`（默认 `12551`）。它与全局 `sakura`
-完全分离，普通流量切到新加坡时不会改变官方 Codex 出口。
+配置生成器从 `CodexOfficialGroup`（默认 `sakura-region-us`，本机可覆盖为其他地区组）复制
+节点列表，生成独立选择器 `codex-official` 和回环入站 `codex-official-in`（默认 `12551`）。
+它与全局 `sakura` 完全分离，普通流量切换不会改变官方 Codex 出口。`CodexOfficialPreferredNodes`
+可指定优先节点：健康且可达时优先于更高分节点，不可达时回退到正常排序，恢复后重新接管。
 
-`gateway/official_route.py` 只在主后端运行，使用隔离探测核心测量候选的下载、ChatGPT
+`gateway/official_route.py` 在单网关进程中运行，使用隔离探测核心测量候选的下载、ChatGPT
 可达性和无认证 Codex POST 路径；默认 `SakuraFailoverOnly=true` 时只在启动、真实请求
 失败或 ChatGPT 不可达时比较候选，每 3 分钟检查当前节点，切换后 10 分钟 sticky；
 设为 `false` 会恢复每 30 分钟的全量比较。真实官方请求通过 `record_request()` 回传上传/响应头/失败阶段，

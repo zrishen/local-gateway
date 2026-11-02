@@ -2,11 +2,31 @@
 $serviceStatusPath = Join-Path $StateDir 'status.json'
 if (Test-Path -LiteralPath $serviceStatusPath) {
     $serviceStatus = Get-Content -LiteralPath $serviceStatusPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($serviceStatus.ServiceVersion -eq 2) {
+    if ($serviceStatus.ServiceVersion -ge 2) {
         Set-Content -LiteralPath (Join-Path $StateDir 'service.stop') -Value 'manual-stop' -Encoding ASCII
-        $serviceDeadline = (Get-Date).AddSeconds(15)
-        while ((Test-TcpPort '127.0.0.1' $Settings.PublicPort) -and (Get-Date) -lt $serviceDeadline) { Start-Sleep -Milliseconds 250 }
-        if (Test-TcpPort '127.0.0.1' $Settings.PublicPort) { throw 'Service did not stop in time. See logs\service.log.' }
+        $serviceDeadline = (Get-Date).AddSeconds(30)
+        $stopped = $false
+        while ((Get-Date) -lt $serviceDeadline) {
+            $current = $null
+            try {
+                if (Test-Path -LiteralPath $serviceStatusPath) {
+                    $current = Get-Content -LiteralPath $serviceStatusPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                }
+            } catch { }
+            if ($current -and $current.Phase -eq 'stopped') { $stopped = $true; break }
+            $supervisorAlive = $false
+            if ($current -and $current.SupervisorPid) {
+                $supervisorAlive = [bool](Get-Process -Id ([int]$current.SupervisorPid) -ErrorAction SilentlyContinue)
+            }
+            if ($current -and -not $supervisorAlive -and -not (Test-TcpPort '127.0.0.1' $Settings.PublicPort)) {
+                $stopped = $true
+                break
+            }
+            Start-Sleep -Milliseconds 250
+        }
+        if (-not $stopped -or (Test-TcpPort '127.0.0.1' $Settings.PublicPort)) {
+            throw 'Service did not stop in time. See logs\service.log.'
+        }
         Write-Output 'Unified service stopped for this session. Start.ps1 or next Windows logon starts it again.'
         exit 0
     }

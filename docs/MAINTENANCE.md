@@ -18,7 +18,7 @@
 | 启动 | `.\Start.ps1` 或 `Start.cmd` |
 | 停止 | `.\Stop.ps1` 或 `Stop.cmd` |
 | 状态 | `.\Status.ps1` |
-| 安全刷新网关后端 | `.\Restart-Gateway.ps1` |
+| 重启网关进程 | `.\Restart-Gateway.ps1` |
 | 健康检查 | `$python -B .\Health.py` |
 | 开启自启 | `.\Install-Autostart.ps1` |
 | 取消自启 | `.\Disable-Autostart.ps1` |
@@ -37,8 +37,8 @@
 `Import-SakuraSubscription.ps1` 不传 `-Url` 时尝试读取本机 SakuraCat 配置。订阅地址和节点凭据只写入 `state/`。
 
 新增的 `codex-official-in` 入站和 `codex-official` 选择器属于 sing-box 配置变更，必须执行一次完整的
-`Stop.ps1` / `Start.ps1` 才会重新生成 `config.json`。`Restart-Gateway.ps1` 只重启 Python 后端，
-不会应用新入站；在完整重启前 Router 会自动回退到原有代理通道。
+`Stop.ps1` / `Start.ps1` 才会重新生成 `config.json`。`Restart-Gateway.ps1` 只重启 Python
+网关进程，不重启 sing-box 核心，也不会应用新入站；在完整重启前 Router 会自动回退到原有代理通道。
 
 回退到 SakuraCat 本地代理：
 
@@ -91,20 +91,19 @@
 
 | 文件 | 内容 |
 |---|---|
-| `state/status.json` | 服务、内核和网关 PID |
+| `state/status.json` | 服务、核心和网关 PID |
 | `state/mode.json` | 当前模式、节点、上游和代理归属 |
 | `state/sakura-selection.json` | 最近一次普通流量选线结果 |
 | `state/codex-official-route.json` | 官方 Codex 独立通道状态 |
 | `logs/service.log` | 常驻服务生命周期 |
-| `logs/gateway-entry.stderr.log` | 固定入口和后端切换状态 |
 | `logs/gateway.stderr.log` | Python 网关错误 |
-| `logs/gateway-backup.stderr.log` | 备用 Python 网关错误 |
+| `state/gateway-restart.json` | 最近一次 `Restart-Gateway.ps1` 结果 |
 | `logs/ai-upstream.jsonl` | AI 上游连接阶段、重试次数、状态码和请求编号（不记录地址、密钥或请求正文） |
 | `logs/sing-box.log` | sing-box 运行日志 |
 
 日志不要直接公开，其中可能包含访问域名、节点地址和本机时间。
 
-`state/status.json` 会分别记录 `GatewayEntryPid`、`GatewayPid` 和 `GatewayBackupPid`。只检查主网关 PID 无法判断入口是否仍可用；客户端始终使用 `PublicPort`（默认 `8799`），`GatewayBackendPorts`（默认 `18801`、`18802`）只供本机入口转发。主后端退出时新连接会自动转到备用后端；已经建立的单条流无法跨进程迁移。后端刷新开始时先写入 `state/gateway-entry-route.json`，让公开入口把新连接切到待保留的后端，再排空并重建待更新后端；刷新结束后恢复首选端口。这个热切换不要求主端先完全空闲，因此持续使用不会把刷新卡住。文件缺失或损坏时会自动回到首选主端。
+`state/status.json` 记录 `CorePid`、`GatewayPid`、`PublicPort` 和 `Phase`，`state/gateway.json` 记录网关进程的 PID、启动时间和 `ServiceVersion`。客户端始终使用 `PublicPort`（默认 `8799`），只有一个 `unified_gateway.py` 进程监听该端口。`Restart-Gateway.ps1` 校验 PID 身份后停止旧进程，等待 `Service.ps1` 拉起新进程并写入新 PID；重启期间新连接会短暂失败，已经建立的单条流无法跨进程迁移。sing-box 核心和 TUN 不受影响。
 
 ### API 上游连接与 502
 
@@ -181,7 +180,7 @@ TUN 检查拒绝截断正文，支持 HTTP chunked 传输解码。`effective_thr
 缺少健康记录或网关不可达时延后处理；手动重启和下次启动也会加载磁盘上的新配置。
 
 断流时有一条有界放行路径：健康记录为 `disconnected`、恢复失败次数达到
-`SakuraEndpointReloadRecoveryFailures`（默认 2）、且两个后端中最老的 AI 请求已超过
+`SakuraEndpointReloadRecoveryFailures`（默认 2）、且网关进程中最老的 AI 请求已超过
 `SakuraEndpointReloadStaleRequestSeconds`（默认 600 秒）时，允许应用配置并重启核心。
 该操作会中断所有 TUN 流量约 93 秒；设为 0 可关闭此放行。`/__status` 通过
 `oldest_ai_request_age_seconds` 暴露最老请求年龄。

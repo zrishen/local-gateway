@@ -416,8 +416,8 @@ class Router:
         self.settings = dict(settings or {})
         self.official_selector = str(
             self.settings.get('CodexOfficialSelector') or 'codex-official')
-        # The running manager is shared with the backend that owns the official
-        # selector. Never create a second state writer here.
+        # The running manager owns the official selector. Never create a
+        # second state writer here.
         self.official_manager = official_manager
 
     def _handle_connect_failure(self, connection):

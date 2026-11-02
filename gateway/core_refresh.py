@@ -6,40 +6,28 @@ import time
 import urllib.request
 
 
-def _port_list(settings):
-    configured = settings.get('GatewayBackendPorts') or [settings['PublicPort']]
-    if not isinstance(configured, (list, tuple)):
-        configured = [configured]
-    ports = []
-    for value in configured:
-        try:
-            port = int(value)
-        except (TypeError, ValueError):
-            return None
-        if 0 < port < 65536 and port not in ports:
-            ports.append(port)
-    return ports or None
+def _gateway_port(settings):
+    try:
+        port = int(settings['PublicPort'])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return port if 0 < port < 65536 else None
 
 
 def active_request_stats(settings, opener):
-    """Sum active streams and keep the oldest age across private backends."""
-    ports = _port_list(settings)
-    if not ports:
+    """Read active streams from the single public gateway."""
+    port = _gateway_port(settings)
+    if port is None:
         return None
-    total = 0
-    oldest = 0.0
-    for port in ports:
-        try:
-            with opener.open(f'http://127.0.0.1:{port}/__status', timeout=2) as response:
-                data = json.load(response)
-            value = int(data.get('active_ai_requests'))
-            age = data.get('oldest_ai_request_age_seconds')
-        except (OSError, ValueError, TypeError):
-            return None
-        total += max(0, value)
-        if isinstance(age, (int, float)):
-            oldest = max(oldest, max(0.0, float(age)))
-    return total, oldest
+    try:
+        with opener.open(f'http://127.0.0.1:{port}/__status', timeout=2) as response:
+            data = json.load(response)
+        value = int(data.get('active_ai_requests'))
+        age = data.get('oldest_ai_request_age_seconds')
+    except (OSError, ValueError, TypeError):
+        return None
+    oldest = max(0.0, float(age)) if isinstance(age, (int, float)) else 0.0
+    return max(0, value), oldest
 
 
 def active_request_count(settings, opener):

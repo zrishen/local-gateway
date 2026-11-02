@@ -81,9 +81,9 @@ def relay(client, mixed_port):
 def make_handler(settings, official_manager=None):
     import sanitize_proxy
     from codex_router import Router
-    # PublicPort is the stable client-facing entry. ListenPort is this
-    # particular backend's private socket, so third-party self-calls stay on
-    # the same process and do not bounce through the stable entry.
+    # Production binds PublicPort directly. ListenPort remains an optional
+    # override for isolated tests and shadow runs, so third-party self-calls
+    # stay on this process instead of bouncing through another listener.
     listen_port = int(settings.get('ListenPort') or settings['PublicPort'])
     sanitize_proxy.PORT = int(settings['PublicPort'])
     codex = Router(api_port=listen_port, settings=settings,
@@ -186,7 +186,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int)
     parser.add_argument('--mixed-port', type=int)
-    parser.add_argument('--no-monitor', action='store_true')
     args = parser.parse_args()
     from settings_config import load_settings
     settings = load_settings(ROOT)
@@ -198,30 +197,29 @@ def main():
         settings['MixedPort'] = args.mixed_port
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     official_manager = None
-    if not args.no_monitor:
-        from codex_catalog import CatalogSync
-        threading.Thread(target=CatalogSync().run, daemon=True,
-                         name='codex-model-catalog').start()
-        from mode_monitor import ModeMonitor
-        monitor = ModeMonitor(ROOT, settings)
-        threading.Thread(target=monitor.run, daemon=True, name='sakura-mode-monitor').start()
-        from latency_selector import LatencySelector
-        try:
-            selector = LatencySelector(ROOT, settings)
-            threading.Thread(target=selector.run, daemon=True, name='sakura-latency-selector').start()
-        except OSError as error:
-            logging.warning('Sakura latency selector not started: %s', error)
-        from official_route import OfficialRouteManager
-        try:
-            official_manager = OfficialRouteManager(ROOT, settings)
-            threading.Thread(target=official_manager.run, daemon=True,
-                             name='codex-official-route').start()
-        except (OSError, ValueError, TypeError) as error:
-            logging.warning('Official Codex route manager not started: %s', error)
+    from codex_catalog import CatalogSync
+    threading.Thread(target=CatalogSync().run, daemon=True,
+                     name='codex-model-catalog').start()
+    from mode_monitor import ModeMonitor
+    monitor = ModeMonitor(ROOT, settings)
+    threading.Thread(target=monitor.run, daemon=True, name='sakura-mode-monitor').start()
+    from latency_selector import LatencySelector
+    try:
+        selector = LatencySelector(ROOT, settings)
+        threading.Thread(target=selector.run, daemon=True, name='sakura-latency-selector').start()
+    except OSError as error:
+        logging.warning('Sakura latency selector not started: %s', error)
+    from official_route import OfficialRouteManager
+    try:
+        official_manager = OfficialRouteManager(ROOT, settings)
+        threading.Thread(target=official_manager.run, daemon=True,
+                         name='codex-official-route').start()
+    except (OSError, ValueError, TypeError) as error:
+        logging.warning('Official Codex route manager not started: %s', error)
     with Server(('127.0.0.1', settings['ListenPort']),
                 make_handler(settings, official_manager)) as server:
-        logging.info('Unified AI/HTTP/SOCKS backend listening on 127.0.0.1:%d (entry %d)',
-                     settings['ListenPort'], settings['PublicPort'])
+        logging.info('Unified AI/HTTP/SOCKS gateway listening on 127.0.0.1:%d',
+                     settings['ListenPort'])
         server.serve_forever(poll_interval=.5)
 
 

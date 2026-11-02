@@ -29,32 +29,30 @@ class CoreRefreshTests(unittest.TestCase):
         pending = {**self.health('low', 2), 'pending_switch': {'samples': []}}
         self.assertFalse(reload_decision(pending, 0, now=1001)['reload'])
 
-    def test_active_requests_are_summed_across_private_backends(self):
+    def test_active_requests_are_read_from_the_public_gateway(self):
         class Opener:
-            def __init__(self, counts):
-                self.counts = counts
+            def __init__(self, value):
+                self.value = value
                 self.urls = []
 
             def open(self, url, timeout=0):
                 self.urls.append(url)
-                port = int(url.rsplit(':', 1)[1].split('/', 1)[0])
-                value = self.counts.get(port)
-                if value is None:
-                    raise OSError('backend down')
-                if isinstance(value, tuple):
-                    active, oldest = value
-                    payload = {'active_ai_requests': active,
-                               'oldest_ai_request_age_seconds': oldest}
-                else:
-                    payload = {'active_ai_requests': value}
+                if self.value is None:
+                    raise OSError('gateway down')
+                active, oldest = self.value
+                payload = {'active_ai_requests': active,
+                           'oldest_ai_request_age_seconds': oldest}
                 return BytesIO(json.dumps(payload).encode())
 
-        opener = Opener({18801: (1, 640), 18802: (2, 120)})
-        settings = {'PublicPort': 8799, 'GatewayBackendPorts': [18801, 18802]}
-        self.assertEqual(active_request_count(settings, opener), 3)
-        self.assertEqual(active_request_stats(settings, opener), (3, 640))
-        self.assertEqual(len(opener.urls), 4)
-        self.assertIsNone(active_request_count(settings, Opener({18801: 0})))
+        settings = {'PublicPort': 8799}
+        count_opener = Opener((3, 640))
+        self.assertEqual(active_request_count(settings, count_opener), 3)
+        self.assertEqual(count_opener.urls, ['http://127.0.0.1:8799/__status'])
+        stats_opener = Opener((3, 640))
+        self.assertEqual(active_request_stats(settings, stats_opener), (3, 640))
+        self.assertEqual(stats_opener.urls, ['http://127.0.0.1:8799/__status'])
+        self.assertIsNone(active_request_stats(settings, Opener(None)))
+        self.assertIsNone(active_request_stats({}, Opener((0, 0))))
 
     def test_stale_active_request_allows_a_disconnected_reload(self):
         health = self.health('disconnected', recovery_failures=2)

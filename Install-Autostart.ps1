@@ -29,7 +29,7 @@ try {
     $existing = Get-OwnedProcess
     if ($existing) {
         $runtime = Get-Content -LiteralPath (Join-Path $StateDir 'runtime.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-        $marker = if ($runtime.ServiceVersion -eq 2) {'service.stop'} else {'stop.request'}
+        $marker = if ($runtime.ServiceVersion -ge 2) {'service.stop'} else {'stop.request'}
         Set-Content -LiteralPath (Join-Path $StateDir $marker) -Value 'upgrade' -Encoding ASCII
         $deadline = (Get-Date).AddSeconds(20)
         while ((Test-TcpPort '127.0.0.1' $Settings.ControllerPort) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
