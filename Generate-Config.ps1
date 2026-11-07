@@ -202,7 +202,9 @@ if (-not $ProxyOnly) {
     $tunExclusions = $tunExclusionJson | ConvertFrom-Json
     $config.inbounds = @(@{
         type='tun'; tag='tun-in'; interface_name=$Settings.TunName
-        address=@('172.31.255.1/30','fdfe:dcba:9876::1/126')
+        # Older Windows Bonjour versions overrun their IPv6 mask buffer for
+        # non-byte-aligned prefixes. /120 also keeps the TUN peer in the subnet.
+        address=@('172.31.255.1/30','fdfe:dcba:9876::1/120')
         mtu=1500; auto_route=$true; strict_route=$false; dns_mode='native'; stack='mixed'
         route_exclude_address=@($tunExclusions)
     }) + $config.inbounds
