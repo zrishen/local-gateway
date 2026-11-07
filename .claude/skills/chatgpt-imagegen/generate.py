@@ -12,9 +12,18 @@ Usage:
     uv run --no-project --with curl_cffi python generate.py \
         --prompt "..." --out "/abs/path/out.png"
 
-The account credential is read from ~/.codex/auth.json. Expired access tokens
-are refreshed with the stored refresh token and the file is updated atomically.
-Nothing is printed except one JSON line on success (or an error on stderr).
+    # Edit or use reference image(s):
+    uv run --no-project --with curl_cffi python generate.py \
+        --prompt "..." --image "/abs/path/input.png" --out "/abs/path/out.png"
+
+The account credential defaults to ~/.codex/auth.json and can be overridden
+with --auth-file or CHATGPT_AUTH_FILE. Expired access tokens are refreshed with
+the stored refresh token and the file is updated atomically. Proxy settings
+come from HTTPS_PROXY or the Windows system proxy. Timezone settings default to
+the local timezone and can be overridden with --timezone/--timezone-offset-min.
+Successful conversations are archived after download; use --no-archive to keep
+one active. Nothing is printed except one JSON line on success (or an error on
+stderr).
 """
 from __future__ import annotations
 
@@ -32,6 +41,7 @@ from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 BASE = "https://chatgpt.com"
 AUTH_URL = "https://auth.openai.com/oauth/token"
@@ -50,9 +60,189 @@ def log(msg: str, verbose: bool = False) -> None:
         print(msg, file=sys.stderr)
 
 
+def warn(msg: str) -> None:
+    print(f"warning: {msg}", file=sys.stderr)
+
+
 def fail(message: str, code: int = 1) -> "None":
     print(json.dumps({"ok": False, "error": message}, ensure_ascii=False), file=sys.stderr)
     raise SystemExit(code)
+
+
+# ---------------------------------------------------------------- reference images
+
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+SUPPORTED_IMAGE_MIMES = {"image/png", "image/jpeg", "image/webp"}
+
+
+def system_proxy_url() -> str | None:
+    """Return an explicit proxy for curl_cffi, or None to let libcurl decide.
+
+    curl_cffi does not read the Windows system proxy. Without this, the
+    chatgpt.com requests may work while the Azure upload host fails.
+    """
+    if any(os.environ.get(key) for key in
+           ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")):
+        return None
+    if os.name != "nt":
+        return None
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings") as key:
+            enabled = winreg.QueryValueEx(key, "ProxyEnable")[0]
+            server = str(winreg.QueryValueEx(key, "ProxyServer")[0] or "")
+    except (OSError, ImportError, ValueError):
+        return None
+    if not enabled or not server:
+        return None
+    entries = {}
+    for item in server.split(";"):
+        if "=" in item:
+            name, value = item.split("=", 1)
+            entries[name.strip().lower()] = value.strip()
+    value = entries.get("https") or entries.get("http") or server
+    if not value:
+        return None
+    return value if "://" in value else "http://" + value
+
+
+def local_timezone() -> tuple[int, str]:
+    """Return the JavaScript-style UTC offset and a local timezone name."""
+    now = datetime.now().astimezone()
+    offset = now.utcoffset() or timedelta(0)
+    minutes = -int(offset.total_seconds() // 60)
+    name = os.environ.get("TZ") or now.tzname() or "UTC"
+    return minutes, name
+
+
+def sniff_image_mime(data: bytes) -> str:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return ""
+
+
+def image_dimensions(data: bytes, mime: str) -> tuple[int, int]:
+    """Return (width, height) without adding Pillow as a dependency."""
+    try:
+        if mime == "image/png" and len(data) >= 24:
+            return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+        if mime == "image/webp" and len(data) >= 30:
+            chunk = data[12:16]
+            if chunk == b"VP8X":
+                return (1 + int.from_bytes(data[24:27], "little"),
+                        1 + int.from_bytes(data[27:30], "little"))
+            if chunk == b"VP8L" and data[20] == 0x2F:
+                bits = int.from_bytes(data[21:25], "little")
+                return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+            if chunk == b"VP8 " and len(data) >= 30:
+                return (int.from_bytes(data[26:28], "little") & 0x3FFF,
+                        int.from_bytes(data[28:30], "little") & 0x3FFF)
+        if mime == "image/jpeg":
+            i = 2
+            sof = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                   0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
+            while i + 9 < len(data):
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = data[i + 1]
+                if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+                    i += 2
+                    continue
+                length = int.from_bytes(data[i + 2:i + 4], "big")
+                if length < 2:
+                    break
+                if marker in sof:
+                    return (int.from_bytes(data[i + 7:i + 9], "big"),
+                            int.from_bytes(data[i + 5:i + 7], "big"))
+                i += 2 + length
+    except (IndexError, ValueError):
+        pass
+    return 1, 1
+
+
+def load_reference_images(paths: list[str]) -> list[dict[str, Any]]:
+    images: list[dict[str, Any]] = []
+    for raw in paths:
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = path.resolve()
+        if not path.is_file():
+            fail(f"reference image not found: {path}")
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            fail(f"cannot read reference image {path}: {type(exc).__name__}")
+        if not data:
+            fail(f"reference image is empty: {path}")
+        if len(data) > MAX_IMAGE_BYTES:
+            fail(f"reference image is larger than 20 MiB: {path.name}")
+        mime = sniff_image_mime(data)
+        if mime not in SUPPORTED_IMAGE_MIMES:
+            fail(f"reference image must be PNG, JPEG, or WebP: {path.name}")
+        width, height = image_dimensions(data, mime)
+        images.append({
+            "path": path,
+            "file_name": path.name,
+            "data": data,
+            "mime_type": mime,
+            "size": len(data),
+            "width": width,
+            "height": height,
+        })
+    return images
+
+
+def image_asset_pointer(image: dict[str, Any]) -> dict[str, Any]:
+    file_id = image["file_id"]
+    scheme = "sediment" if file_id.startswith("file_") else "file-service"
+    return {
+        "asset_pointer": f"{scheme}://{file_id}",
+        "content_type": "image_asset_pointer",
+        "height": image.get("height") or 1,
+        "size_bytes": image.get("size") or 0,
+        "width": image.get("width") or 1,
+    }
+
+
+def attachment_metadata(image: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": image["file_id"],
+        "name": image.get("file_name") or "",
+        "size": image.get("size") or 0,
+        "mime_type": image.get("mime_type") or "",
+        "width": image.get("width") or 1,
+        "height": image.get("height") or 1,
+    }
+
+
+def build_user_message(prompt: str, images: list[dict[str, Any]]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "developer_mode_connector_ids": [],
+        "selected_github_repos": [],
+        "selected_all_github_repos": False,
+        "system_hints": ["picture_v2"],
+        "serialization_metadata": {"custom_symbol_offsets": []},
+    }
+    content: dict[str, Any] = {"content_type": "text", "parts": [prompt]}
+    if images:
+        content = {
+            "content_type": "multimodal_text",
+            "parts": [*[image_asset_pointer(image) for image in images], prompt],
+        }
+        metadata["attachments"] = [attachment_metadata(image) for image in images]
+    return {
+        "id": str(uuid.uuid4()),
+        "author": {"role": "user"},
+        "create_time": time.time(),
+        "content": content,
+        "metadata": metadata,
+    }
 
 
 # ---------------------------------------------------------------- auth
@@ -110,17 +300,19 @@ def refresh_auth(auth: dict[str, Any], path: Path, verbose: bool = False) -> dic
     return auth
 
 
-def load_access_token(verbose: bool = False) -> str:
-    path = Path.home() / ".codex" / "auth.json"
+def load_access_token(verbose: bool = False, auth_file: str = "") -> str:
+    configured = auth_file or os.environ.get("CHATGPT_AUTH_FILE") or ""
+    path = (Path(configured).expanduser() if configured
+            else Path.home() / ".codex" / "auth.json")
     if not path.exists():
-        fail("~/.codex/auth.json not found; run `codex login` first")
+        fail(f"ChatGPT auth file not found: {path}; run `codex login` or set --auth-file/CHATGPT_AUTH_FILE")
     try:
         auth = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
-        fail(f"cannot read ~/.codex/auth.json: {type(exc).__name__}")
+        fail(f"cannot read ChatGPT auth file {path}: {type(exc).__name__}")
     token = (auth.get("tokens") or {}).get("access_token") or ""
     if not token:
-        fail("no ChatGPT access_token in ~/.codex/auth.json; run `codex login`")
+        fail(f"no ChatGPT access_token in {path}; run `codex login` or set --auth-file/CHATGPT_AUTH_FILE")
     if _jwt_exp(token) and _jwt_exp(token) <= time.time() + 60:
         auth = refresh_auth(auth, path, verbose)
         token = auth["tokens"]["access_token"]
@@ -376,11 +568,17 @@ def solve_turnstile_token(dx: str, p: str) -> str | None:
 # ---------------------------------------------------------------- client
 
 class Client:
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, timezone_name: str = "",
+                 timezone_offset_min: int | None = None) -> None:
         from curl_cffi import requests
 
+        local_offset, local_name = local_timezone()
         self.token = token
-        self.session = requests.Session(impersonate="edge101", timeout=60)
+        self.timezone_offset_min = (timezone_offset_min
+                                    if timezone_offset_min is not None else local_offset)
+        self.timezone_name = timezone_name or local_name
+        self.session = requests.Session(
+            impersonate="edge101", timeout=60, proxy=system_proxy_url())
         self.session.headers.update({
             "User-Agent": UA,
             "Origin": BASE,
@@ -419,8 +617,21 @@ class Client:
             h.update(extra)
         return h
 
+    def _request_retry(self, method: str, url: str, attempts: int = 3, **kwargs: Any) -> Any:
+        last: Exception | None = None
+        for index in range(attempts):
+            try:
+                return self.session.request(method, url, **kwargs)
+            except Exception as exc:
+                last = exc
+                if index + 1 < attempts:
+                    time.sleep(0.8 * (index + 1))
+        if last:
+            raise last
+        raise RuntimeError(f"{method} {url} failed without an exception")
+
     def bootstrap(self, verbose: bool = False) -> None:
-        r = self.session.get(BASE + "/", headers={
+        r = self._request_retry("GET", BASE + "/", headers={
             "User-Agent": UA,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
@@ -436,8 +647,9 @@ class Client:
     def requirements(self, verbose: bool = False) -> dict[str, str]:
         path = "/backend-api/sentinel/chat-requirements"
         p = build_legacy_requirements_token(UA, self.scripts, self.data_build)
-        r = self.session.post(BASE + path, headers=self.headers(path, {"Content-Type": "application/json"}),
-                              json={"p": p})
+        r = self._request_retry("POST", BASE + path,
+                                headers=self.headers(path, {"Content-Type": "application/json"}),
+                                json={"p": p})
         if r.status_code != 200:
             fail(f"chat-requirements failed: HTTP {r.status_code} {r.text[:200]}")
         data = r.json()
@@ -472,41 +684,208 @@ class Client:
             h["X-Oai-Turn-Trace-Id"] = str(uuid.uuid4())
         return self.headers(path, h)
 
-    def prepare(self, prompt: str, req: dict[str, str], model: str) -> str:
+    def _upload_blob(self, upload_url: str, image: dict[str, Any],
+                     upload_headers: dict[str, str] | None) -> None:
+        from curl_cffi import requests
+
+        parts = urlsplit(upload_url)
+        mime = image["mime_type"]
+        data = image["data"]
+        last: Exception | None = None
+        for index, impersonate in enumerate(("edge101", "chrome124", "safari17_0")):
+            session = self.session
+            if index:
+                session = requests.Session(
+                    impersonate=impersonate, timeout=120, proxy=system_proxy_url())
+            try:
+                if parts.path.endswith("/estuary/upload_content_bytes"):
+                    embedded = (parse_qs(parts.query).get("upload_url") or [""])[0]
+                    if not embedded:
+                        raise RuntimeError("combined upload URL has no embedded upload_url")
+                    r = session.post(
+                        upload_url,
+                        data={"upload_url": embedded},
+                        files={"file": (image["file_name"], data, mime)},
+                        headers={"Origin": BASE, "Referer": BASE + "/"},
+                        timeout=120,
+                    )
+                else:
+                    headers = {"Content-Type": mime}
+                    if "x-amz-algorithm=" not in parts.query.lower():
+                        headers.update({
+                            "x-ms-blob-type": "BlockBlob",
+                            "x-ms-version": "2020-04-08",
+                            "x-ms-blob-content-type": mime,
+                        })
+                    if upload_headers:
+                        headers.update({str(k): str(v) for k, v in upload_headers.items()})
+                    r = session.put(upload_url, data=data, headers=headers, timeout=120)
+                if 200 <= r.status_code < 300:
+                    return
+                last = RuntimeError(f"blob upload failed: HTTP {r.status_code}")
+                if 400 <= r.status_code < 500:
+                    break
+            except Exception as exc:
+                last = exc
+            if index + 1 < 3:
+                time.sleep(0.8 * (index + 1))
+        if last:
+            raise last
+        raise RuntimeError("blob upload failed without an exception")
+
+    def _confirm_upload(self, image: dict[str, Any], req: dict[str, str]) -> tuple[bool, str]:
+        path = "/backend-api/files/process_upload_stream"
+        payload = {
+            "entry_surface": "chat_composer",
+            "file_id": image["file_id"],
+            "file_name": image["file_name"],
+            "index_for_retrieval": False,
+            "metadata": {},
+            "mime_type": image["mime_type"],
+            "use_case": "multimodal",
+        }
+        r = self._request_retry(
+            "POST", BASE + path, attempts=2,
+            headers=self.conv_headers(path, req, accept="text/event-stream"),
+            json=payload,
+            stream=True,
+            timeout=120,
+        )
+        if not 200 <= r.status_code < 300:
+            detail = f"HTTP {r.status_code}"
+            r.close()
+            return False, detail
+        event_name = ""
+        completed = False
+        error_name = ""
+        try:
+            for line in r.iter_lines():
+                if not line:
+                    continue
+                if isinstance(line, bytes):
+                    line = line.decode("utf-8", "replace")
+                line = line.strip()
+                if not line or line == "[DONE]":
+                    continue
+                if line.startswith("event:"):
+                    event_name = line[6:].strip()
+                    continue
+                if line.startswith("data:"):
+                    line = line[5:].strip()
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                name = str(obj.get("event") or obj.get("name") or event_name or "")
+                if obj.get("error"):
+                    error_name = name or "upload processing error"
+                    break
+                if name.endswith(".error") or name.endswith(".failed") or name.endswith(".cancelled"):
+                    error_name = name
+                    break
+                if name in ("file.processing.file_ready", "file.processing.completed"):
+                    completed = True
+                    if name == "file.processing.completed":
+                        break
+        finally:
+            r.close()
+        if error_name:
+            return False, error_name
+        return (True, "" if completed else "stream ended")
+
+    def upload_image(self, image: dict[str, Any], req: dict[str, str],
+                     verbose: bool = False) -> dict[str, Any]:
+        path = "/backend-api/files"
+        payload = {
+            "client_resolved_mime_type": image["mime_type"],
+            "entry_surface": "chat_composer",
+            "file_name": image["file_name"],
+            "file_size": image["size"],
+            "reset_rate_limits": False,
+            "timezone_offset_min": self.timezone_offset_min,
+            "use_case": "multimodal",
+        }
+        r = self._request_retry("POST", BASE + path,
+                                headers=self.conv_headers(path, req), json=payload)
+        if not 200 <= r.status_code < 300:
+            fail(f"file registration failed: HTTP {r.status_code} {r.text[:200]}")
+        try:
+            created = r.json()
+        except Exception:
+            fail("file registration returned invalid JSON")
+        file_id = str(created.get("file_id") or "")
+        upload_url = str(created.get("upload_url") or "")
+        if not file_id or not upload_url:
+            fail("file registration returned no file_id/upload_url")
+        upload_headers = created.get("upload_headers")
+        if not isinstance(upload_headers, dict):
+            upload_headers = None
+        uploaded = {**image, "file_id": file_id}
+        log(f"uploading reference {image['file_name']} ({image['size']} bytes, "
+            f"{image['width']}x{image['height']})", verbose)
+        try:
+            self._upload_blob(upload_url, uploaded, upload_headers)
+        except Exception as exc:
+            fail(f"reference image upload failed: {str(exc)[:200]}")
+        uploaded.pop("data", None)
+        ok, detail = self._confirm_upload(uploaded, req)
+        if not ok:
+            # Older web builds used this endpoint; keep it as a compatibility
+            # fallback when process_upload_stream is unavailable.
+            old_path = f"/backend-api/files/{file_id}/uploaded"
+            old = self._request_retry(
+                "POST", BASE + old_path, headers=self.conv_headers(old_path, req), json={})
+            if not 200 <= old.status_code < 300:
+                fail(f"reference image processing failed: {detail}; "
+                     f"fallback HTTP {old.status_code}")
+            log("reference image confirmed through legacy uploaded endpoint", verbose)
+        else:
+            log(f"reference image ready: {image['file_name']}", verbose)
+        return uploaded
+
+    def prepare(self, prompt: str, req: dict[str, str], model: str,
+                images: list[dict[str, Any]] | None = None) -> str:
         path = "/backend-api/f/conversation/prepare"
+        images = images or []
+        message = build_user_message(prompt, images)
+        partial_query = {
+            "id": message["id"],
+            "author": message["author"],
+            "content": message["content"],
+        }
+        if images:
+            partial_query["metadata"] = {"attachments": message["metadata"]["attachments"]}
         payload = {
             "action": "next", "fork_from_shared_post": False,
             "parent_message_id": str(uuid.uuid4()), "model": model,
-            "client_prepare_state": "success", "timezone_offset_min": -480,
-            "timezone": "Asia/Shanghai",
+            "client_prepare_state": "success",
+            "timezone_offset_min": self.timezone_offset_min,
+            "timezone": self.timezone_name,
             "conversation_mode": {"kind": "primary_assistant"},
             "system_hints": ["picture_v2"],
-            "partial_query": {"id": str(uuid.uuid4()), "author": {"role": "user"},
-                              "content": {"content_type": "text", "parts": [prompt]}},
+            "partial_query": partial_query,
             "supports_buffering": True, "supported_encodings": ["v1"],
             "client_contextual_info": {"app_name": "chatgpt.com"},
         }
-        r = self.session.post(BASE + path, headers=self.conv_headers(path, req), json=payload)
+        r = self._request_retry("POST", BASE + path,
+                                headers=self.conv_headers(path, req), json=payload)
         if r.status_code != 200:
             fail(f"prepare failed: HTTP {r.status_code} {r.text[:300]}")
         return r.json().get("conduit_token", "")
 
     def generate(self, prompt: str, req: dict[str, str], conduit: str,
-                 model: str) -> tuple[str, list[str], list[str]]:
+                 model: str, images: list[dict[str, Any]] | None = None
+                 ) -> tuple[str, list[str], list[str]]:
         path = "/backend-api/f/conversation"
         payload = {
             "action": "next",
-            "messages": [{"id": str(uuid.uuid4()), "author": {"role": "user"},
-                          "create_time": time.time(),
-                          "content": {"content_type": "text", "parts": [prompt]},
-                          "metadata": {"developer_mode_connector_ids": [],
-                                       "selected_github_repos": [],
-                                       "selected_all_github_repos": False,
-                                       "system_hints": ["picture_v2"],
-                                       "serialization_metadata": {"custom_symbol_offsets": []}}}],
+            "messages": [build_user_message(prompt, images or [])],
             "parent_message_id": str(uuid.uuid4()), "model": model,
-            "client_prepare_state": "sent", "timezone_offset_min": -480,
-            "timezone": "Asia/Shanghai",
+            "client_prepare_state": "sent",
+            "timezone_offset_min": self.timezone_offset_min,
+            "timezone": self.timezone_name,
             "conversation_mode": {"kind": "primary_assistant"},
             "enable_message_followups": True, "system_hints": ["picture_v2"],
             "supports_buffering": True, "supported_encodings": ["v1"],
@@ -517,8 +896,10 @@ class Client:
             "paragen_cot_summary_display_override": "allow",
             "force_parallel_switch": "auto",
         }
-        r = self.session.post(BASE + path, headers=self.conv_headers(path, req, conduit, "text/event-stream"),
-                              json=payload, stream=True)
+        r = self._request_retry(
+            "POST", BASE + path, attempts=3,
+            headers=self.conv_headers(path, req, conduit, "text/event-stream"),
+            json=payload, stream=True)
         if r.status_code != 200:
             detail = r.text[:300]
             fail(f"conversation failed: HTTP {r.status_code} {detail}")
@@ -564,7 +945,8 @@ class Client:
         start = time.time()
         while time.time() - start < timeout:
             path = f"/backend-api/conversation/{conv_id}"
-            r = self.session.get(BASE + path, headers=self.headers(path, {"Accept": "application/json"}))
+            r = self._request_retry("GET", BASE + path,
+                                    headers=self.headers(path, {"Accept": "application/json"}))
             if r.status_code == 200:
                 file_ids: list[str] = []
                 sed_ids: list[str] = []
@@ -588,7 +970,8 @@ class Client:
             if fid == "file_upload":
                 continue
             path = f"/backend-api/files/{fid}/download"
-            r = self.session.get(BASE + path, headers=self.headers(path, {"Accept": "application/json"}))
+            r = self._request_retry("GET", BASE + path,
+                                    headers=self.headers(path, {"Accept": "application/json"}))
             if r.status_code == 200:
                 d = r.json()
                 if d.get("download_url") or d.get("url"):
@@ -596,57 +979,104 @@ class Client:
         if not urls:
             for sid in sed_ids:
                 path = f"/backend-api/conversation/{conv_id}/attachment/{sid}/download"
-                r = self.session.get(BASE + path, headers=self.headers(path, {"Accept": "application/json"}))
+                r = self._request_retry("GET", BASE + path,
+                                        headers=self.headers(path, {"Accept": "application/json"}))
                 if r.status_code == 200:
                     d = r.json()
                     if d.get("download_url") or d.get("url"):
                         urls.append(d.get("download_url") or d.get("url"))
         if not urls:
             fail("image was generated but no download URL was returned")
-        r = self.session.get(urls[0], timeout=120)
+        r = self._request_retry("GET", urls[0], timeout=120)
         if r.status_code != 200 or not r.content:
             fail(f"image download failed: HTTP {r.status_code}")
         return r.content
 
+    def archive_conversation(self, conv_id: str, req: dict[str, str],
+                             verbose: bool = False) -> bool:
+        path = f"/backend-api/conversation/{conv_id}"
+        try:
+            r = self._request_retry(
+                "PATCH", BASE + path, attempts=2,
+                headers=self.conv_headers(path, req), json={"is_archived": True})
+        except Exception as exc:
+            warn(f"could not archive conversation: {type(exc).__name__}")
+            return False
+        if not 200 <= r.status_code < 300:
+            warn(f"could not archive conversation: HTTP {r.status_code}")
+            return False
+        log("conversation archived", verbose)
+        return True
+
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Generate one image through the ChatGPT web backend")
-    ap.add_argument("--prompt", required=True)
-    ap.add_argument("--out", required=True, help="absolute path to the output .png")
+    ap = argparse.ArgumentParser(description="Generate or edit one image through the ChatGPT web backend")
+    ap.add_argument("--prompt", help="image prompt or edit instruction")
+    ap.add_argument("--out", help="absolute path to the output image")
+    ap.add_argument("--image", action="append", default=[],
+                    help="reference image path for editing; repeatable")
+    ap.add_argument("--auth-file", default="",
+                    help="ChatGPT auth JSON; default: CHATGPT_AUTH_FILE or ~/.codex/auth.json")
     ap.add_argument("--model", default="auto", help="web model slug (default: auto)")
     ap.add_argument("--timeout", type=float, default=300.0, help="seconds to wait for the image")
+    ap.add_argument("--timezone", default="",
+                    help="timezone name; default: local timezone or TZ")
+    ap.add_argument("--timezone-offset-min", type=int, default=None,
+                    help="minutes behind UTC; default: local offset")
     ap.add_argument("--check", action="store_true", help="only verify auth and the sentinel handshake")
+    ap.add_argument("--no-archive", action="store_true",
+                    help="keep the ChatGPT conversation active after downloading the image")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
-    out = Path(args.out).expanduser()
-    if not out.is_absolute():
-        fail("--out must be an absolute path")
-    if out.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
-        fail("--out must end with .png/.jpg/.jpeg/.webp")
-    out.parent.mkdir(parents=True, exist_ok=True)
+    out = None
+    references: list[dict[str, Any]] = []
+    if not args.check:
+        if not args.prompt or not args.out:
+            ap.error("--prompt and --out are required unless --check is used")
+        out = Path(args.out).expanduser()
+        if not out.is_absolute():
+            fail("--out must be an absolute path")
+        if out.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+            fail("--out must end with .png/.jpg/.jpeg/.webp")
+        if any(out.resolve() == Path(raw).expanduser().resolve() for raw in args.image):
+            fail("--out must not overwrite a reference image")
+        references = load_reference_images(args.image)
+        out.parent.mkdir(parents=True, exist_ok=True)
 
-    token = load_access_token(args.verbose)
-    client = Client(token)
+    token = load_access_token(args.verbose, args.auth_file)
+    client = Client(token, timezone_name=args.timezone,
+                    timezone_offset_min=args.timezone_offset_min)
     client.bootstrap(args.verbose)
     req = client.requirements(args.verbose)
     if args.check:
         print(json.dumps({"ok": True, "check": "sentinel", "persona": req.get("persona", "")},
                          ensure_ascii=False))
         return
-    conduit = client.prepare(args.prompt, req, args.model)
-    conv_id, file_ids, sed_ids = client.generate(args.prompt, req, conduit, args.model)
+    uploads = [client.upload_image(image, req, args.verbose) for image in references]
+    conduit = client.prepare(args.prompt, req, args.model, uploads)
+    conv_id, file_ids, sed_ids = client.generate(args.prompt, req, conduit, args.model, uploads)
     if not conv_id:
         fail("conversation id was not returned; the turn may have been rejected")
+    reference_ids = {image["file_id"] for image in uploads}
+    file_ids = [x for x in file_ids if x not in reference_ids]
+    sed_ids = [x for x in sed_ids if x not in reference_ids]
     if not file_ids and not sed_ids:
-        log("no image id in stream; polling conversation", args.verbose)
+        log("no generated image id in stream; polling conversation", args.verbose)
         file_ids, sed_ids = client.poll_image(conv_id, args.timeout)
+        file_ids = [x for x in file_ids if x not in reference_ids]
+        sed_ids = [x for x in sed_ids if x not in reference_ids]
     if not file_ids and not sed_ids:
         fail(f"no image received within {args.timeout:g}s (conversation {conv_id})")
     data = client.download_image(conv_id, file_ids, sed_ids)
     out.write_bytes(data)
+    archived = False
+    if not args.no_archive:
+        archived = client.archive_conversation(conv_id, req, args.verbose)
     print(json.dumps({"ok": True, "path": str(out), "bytes": len(data),
-                      "conversation_id": conv_id, "model": args.model}, ensure_ascii=False))
+                      "conversation_id": conv_id, "model": args.model,
+                      "references": len(uploads), "archived": archived},
+                     ensure_ascii=False))
 
 
 if __name__ == "__main__":
