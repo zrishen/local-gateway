@@ -213,7 +213,7 @@ class BuildRequestTests(unittest.TestCase):
         self.assertEqual(request['input'][4]['output'], 'file')
         self.assertEqual(request['input'][5]['content'][0]['text'], 'next')
 
-    def test_tool_result_error_and_image_placeholder(self):
+    def test_tool_result_error_keeps_image_content(self):
         request = bridge.build_responses_request({
             'model': OFFICIAL,
             'messages': [
@@ -231,8 +231,68 @@ class BuildRequestTests(unittest.TestCase):
         })
         output = request['input'][-1]
         self.assertEqual(output['type'], 'function_call_output')
-        self.assertTrue(output['output'].startswith('[tool error] '))
-        self.assertIn('[image omitted', output['output'])
+        self.assertEqual(output['output'], [
+            {'type': 'input_text', 'text': '[tool error] '},
+            {'type': 'input_text', 'text': 'nope'},
+            {'type': 'input_image',
+             'image_url': 'data:image/png;base64,AAA'},
+        ])
+
+    def test_tool_result_preserves_mixed_content_order(self):
+        request = bridge.build_responses_request({
+            'model': OFFICIAL,
+            'messages': [{
+                'role': 'user',
+                'content': [{
+                    'type': 'tool_result', 'tool_use_id': 'toolu_3',
+                    'content': [
+                        {'type': 'text', 'text': 'before'},
+                        {'type': 'image', 'source': {
+                            'type': 'base64', 'media_type': 'image/jpeg',
+                            'data': 'BBB'}},
+                        {'type': 'text', 'text': 'after'},
+                        {'type': 'image', 'source': {
+                            'type': 'url',
+                            'url': 'https://example.test/image.png'}},
+                    ]}]}],
+        })
+        self.assertEqual(request['input'][-1]['output'], [
+            {'type': 'input_text', 'text': 'before'},
+            {'type': 'input_image',
+             'image_url': 'data:image/jpeg;base64,BBB'},
+            {'type': 'input_text', 'text': 'after'},
+            {'type': 'input_image',
+             'image_url': 'https://example.test/image.png'},
+        ])
+
+    def test_tool_result_image_only_is_structured(self):
+        request = bridge.build_responses_request({
+            'model': OFFICIAL,
+            'messages': [{
+                'role': 'user',
+                'content': [{
+                    'type': 'tool_result', 'tool_use_id': 'toolu_4',
+                    'content': [{'type': 'image', 'source': {
+                        'type': 'base64', 'media_type': 'image/png',
+                        'data': 'CCC'}}]}]}],
+        })
+        self.assertEqual(request['input'][-1]['output'], [
+            {'type': 'input_image',
+             'image_url': 'data:image/png;base64,CCC'},
+        ])
+
+    def test_invalid_tool_result_image_keeps_text_placeholder(self):
+        request = bridge.build_responses_request({
+            'model': OFFICIAL,
+            'messages': [{
+                'role': 'user',
+                'content': [{
+                    'type': 'tool_result', 'tool_use_id': 'toolu_5',
+                    'content': [{'type': 'image', 'source': {
+                        'type': 'base64', 'data': ''}}]}]}],
+        })
+        self.assertEqual(request['input'][-1]['output'],
+                         '[image omitted from tool result]')
 
     def test_tool_choice_and_reasoning_mapping(self):
         request = bridge.build_responses_request({
@@ -334,6 +394,23 @@ class InspectionTests(unittest.TestCase):
     def test_token_estimate_is_positive(self):
         self.assertGreaterEqual(bridge.estimate_input_tokens(
             message_request()), 1)
+
+    def test_token_estimate_counts_tool_result_images(self):
+        def estimate(content):
+            return bridge.estimate_input_tokens({
+                'model': OFFICIAL,
+                'messages': [{'role': 'user', 'content': [{
+                    'type': 'tool_result', 'tool_use_id': 'toolu_6',
+                    'content': content}]}],
+            })
+
+        text_only = estimate([{'type': 'text', 'text': 'same'}])
+        with_image = estimate([
+            {'type': 'text', 'text': 'same'},
+            {'type': 'image', 'source': {
+                'type': 'base64', 'media_type': 'image/png', 'data': 'AAA'}},
+        ])
+        self.assertGreaterEqual(with_image - text_only, 1600)
 
 
 class TranslatorTests(unittest.TestCase):

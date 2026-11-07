@@ -229,28 +229,6 @@ def system_text(value):
     return ''
 
 
-def tool_result_text(content):
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                if item.get('type') == 'text' and isinstance(item.get('text'), str):
-                    parts.append(item['text'])
-                elif item.get('type') == 'image':
-                    parts.append('[image omitted from tool result]')
-        return '\n'.join(parts)
-    if content is None:
-        return ''
-    try:
-        return json.dumps(content, ensure_ascii=False)
-    except (TypeError, ValueError):
-        return str(content)
-
-
 def image_part(block):
     source = block.get('source')
     if not isinstance(source, dict):
@@ -266,6 +244,36 @@ def image_part(block):
         if isinstance(url, str) and url:
             return {'type': 'input_image', 'image_url': url}
     return None
+
+
+def tool_result_content_items(content):
+    """Convert tool_result content to ordered Responses input items."""
+    if isinstance(content, str):
+        return [{'type': 'input_text', 'text': content}]
+    if isinstance(content, list):
+        items = []
+        for item in content:
+            if isinstance(item, str):
+                items.append({'type': 'input_text', 'text': item})
+            elif isinstance(item, dict):
+                kind = item.get('type')
+                if kind == 'text' and isinstance(item.get('text'), str):
+                    items.append({'type': 'input_text', 'text': item['text']})
+                elif kind == 'image':
+                    part = image_part(item)
+                    if part is None:
+                        items.append({'type': 'input_text',
+                                      'text': '[image omitted from tool result]'})
+                    else:
+                        items.append(part)
+        return items
+    if content is None:
+        return []
+    try:
+        text = json.dumps(content, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = str(content)
+    return [{'type': 'input_text', 'text': text}]
 
 
 def function_call_item(block):
@@ -290,9 +298,16 @@ def function_call_output_item(block):
     call_id = block.get('tool_use_id')
     if not isinstance(call_id, str) or not call_id:
         return None
-    output = tool_result_text(block.get('content'))
-    if block.get('is_error'):
-        output = '[tool error] ' + output
+    items = tool_result_content_items(block.get('content'))
+    if any(item.get('type') == 'input_image' for item in items):
+        output = items
+        if block.get('is_error'):
+            output = [{'type': 'input_text', 'text': '[tool error] '}] + output
+    else:
+        output = '\n'.join(item['text'] for item in items
+                           if item.get('type') == 'input_text')
+        if block.get('is_error'):
+            output = '[tool error] ' + output
     return {'type': 'function_call_output', 'call_id': call_id, 'output': output}
 
 
@@ -484,7 +499,11 @@ def estimate_input_tokens(data):
                     except (TypeError, ValueError):
                         pass
                 elif kind == 'tool_result':
-                    total += _text_tokens(tool_result_text(block.get('content')))
+                    for item in tool_result_content_items(block.get('content')):
+                        if item.get('type') == 'input_image':
+                            total += 1600
+                        else:
+                            total += _text_tokens(item.get('text'))
     tools = data.get('tools')
     if isinstance(tools, list):
         for tool in tools:
