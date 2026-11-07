@@ -6,7 +6,7 @@
 """Generate one image through the ChatGPT web backend using ChatGPT OAuth.
 
 This is the independent ChatGPT web path. It does not invoke Codex CLI and is
-not a fallback for tools/codex-imagegen/generate.py.
+not a fallback for the codex-imagegen skill.
 
 Usage:
     uv run --no-project --with curl_cffi python generate.py \

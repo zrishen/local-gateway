@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'tools/codex-imagegen'))
+sys.path.insert(0, str(ROOT / '.claude' / 'skills' / 'codex-imagegen'))
 import generate
 
 PNG = b'\x89PNG\r\n\x1a\n'
