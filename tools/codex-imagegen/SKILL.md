@@ -15,6 +15,12 @@ python -B "${CLAUDE_SKILL_DIR}/generate.py" \
 ```
 
 - For edits, add one `--image <path>` per reference image.
+- The wrapper saves the image itself: it reads the `savedPath` from Codex's
+  event stream, copies the file to `--out`, and ends the Codex process as soon
+  as the image is valid. Do not expect the Codex agent to copy files.
+- Codex runs with `--sandbox read-only` by default so the agent cannot move or
+  rewrite files. If image generation fails with a sandbox error, retry once
+  with `--sandbox workspace-write`.
 - The wrapper prints one JSON line; verify the saved file with Read.
 - Keep the output inside the current project; do not overwrite an existing file unless asked.
 - If Codex is configured to use the local gateway, it must already be running; do not restart or modify the gateway.
